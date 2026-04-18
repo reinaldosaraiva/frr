@@ -78,3 +78,11 @@ extern struct event_loop *mgmt_txn_tm;
 
 extern struct event_loop *mgmt_txn_tm;
 extern struct mgmt_master *mgmt_txn_mm;
+
+/*
+ * The CONFIG txn currently in SEND_CFG or APPLY_CFG.  Admission of a new
+ * CONFIG txn is blocked only on this slot; it is cleared post-copy_dss so
+ * the next CONFIG txn can start SEND_CFG while this one is still sending
+ * its FE reply and tearing down.
+ */
+extern struct mgmt_txn *config_active_txn;

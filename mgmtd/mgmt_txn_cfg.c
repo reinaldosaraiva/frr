@@ -501,6 +501,7 @@ static void txn_finish_commit(struct txn_req_commit *ccreq, enum mgmt_result res
 	struct txn_req *txn_req = as_txn_req(ccreq);
 	struct mgmt_txn *txn = txn_req->txn;
 	int ret = 0;
+	int copy_ret = 0;
 
 	success = (result == MGMTD_SUCCESS || result == MGMTD_NO_CFG_CHANGES);
 
@@ -527,13 +528,45 @@ static void txn_finish_commit(struct txn_req_commit *ccreq, enum mgmt_result res
 	apply_op = !ccreq->validate_only && !ccreq->abort && !ccreq->init;
 	accept_changes = ccreq->phase >= MGMTD_COMMIT_PHASE_APPLY_CFG && apply_op;
 	discard_changes = (result == MGMTD_SUCCESS && ccreq->abort);
+	/*
+	 * copy_dss is the point at which candidate and running become
+	 * consistent.  Capture its return so that we do NOT reopen CONFIG
+	 * admission if the copy failed -- an incoming txn could otherwise
+	 * observe half-copied state.
+	 */
 	if (accept_changes) {
 		bool create_cmt_info_rec = (result != MGMTD_NO_CFG_CHANGES && !ccreq->rollback);
 
-		mgmt_ds_copy_dss(ccreq->dst_ds_ctx, ccreq->src_ds_ctx, create_cmt_info_rec);
+		copy_ret = mgmt_ds_copy_dss(ccreq->dst_ds_ctx, ccreq->src_ds_ctx,
+					    create_cmt_info_rec);
 	}
 	if (discard_changes)
-		mgmt_ds_copy_dss(ccreq->src_ds_ctx, ccreq->dst_ds_ctx, false);
+		copy_ret = mgmt_ds_copy_dss(ccreq->src_ds_ctx, ccreq->dst_ds_ctx, false);
+
+	/*
+	 * Post-copy admission handoff.
+	 *
+	 * For FE-driven CONFIG txns (not init, not rollback) that still hold
+	 * their DS txn_lock, candidate and running are now consistent and the
+	 * backend is idle.  Release the DS txn_locks early and clear the
+	 * active slot so the next CONFIG create_txn() is no longer blocked on
+	 * this txn's FE reply or decref.
+	 *
+	 * Set ccreq->txn_lock = false so txn_cfg_cleanup() does not attempt a
+	 * second unlock on the same DS contexts.
+	 *
+	 * If copy_dss failed, locks stay held; the txn destroy path releases
+	 * them via the original ccreq->txn_lock guard.  Admission stays closed
+	 * so the next txn never sees the inconsistent state.
+	 */
+	if (copy_ret == 0 && (accept_changes || discard_changes) &&
+	    !ccreq->init && !ccreq->rollback && ccreq->txn_lock) {
+		mgmt_ds_txn_unlock(ccreq->src_ds_ctx, txn->txn_id);
+		mgmt_ds_txn_unlock(ccreq->dst_ds_ctx, txn->txn_id);
+		ccreq->txn_lock = false;
+		if (config_active_txn == txn)
+			config_active_txn = NULL;
+	}
 
 	/*
 	 * For internal txns do lock cleanup, for front-end session send replies.
