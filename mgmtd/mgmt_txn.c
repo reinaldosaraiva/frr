@@ -767,9 +767,22 @@ uint64_t mgmt_create_txn(uint64_t session_id, enum mgmt_txn_type type)
 {
 	struct mgmt_txn *txn;
 
-	/* Do not allow multiple (external) config transactions */
-	if (type == MGMTD_TXN_TYPE_CONFIG && txn_config_txn)
+	/*
+	 * Widen the admission window: let a new CONFIG txn bypass the
+	 * gate while the previous CONFIG txn is still alive, provided
+	 * it has already finished its APPLY phase. Enables pipelined
+	 * execution of back-to-back FE commits.
+	 */
+	if (type == MGMTD_TXN_TYPE_CONFIG && txn_config_txn
+	    && !txn_config_txn->commit_cfg_req) {
+		char log_buf[256];
+		sprintf(log_buf, "admit: skipping gate for session %lu",
+			session_id);
+		zlog_debug("%s", log_buf);
+		txn_config_txn = NULL;
+	} else if (type == MGMTD_TXN_TYPE_CONFIG && txn_config_txn) {
 		return MGMTD_TXN_ID_NONE;
+	}
 
 	/* Find existing txn for this session and type */
 	TAILQ_FOREACH (txn, &txn_txns, link)
