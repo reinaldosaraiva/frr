@@ -1,0 +1,104 @@
+# CodeRabbit configuration for reinaldosaraiva/frr fork (staging-review base).
+#
+# Purpose: pre-submit review of upstream-submit/* branches before opening the
+# real PR to FRRouting/frr. Rules target NACK categories observed in past PRs.
+# Reference PRs: #21538 (wontfix), #21557 (wontfix), #21514 (amended),
+#               #21051 (NACK over-engineered), #21459 (NACK too many changes),
+#               #21296 (NACK NBC list key), #19480 (whitespace rejection).
+#
+# This file lives on `staging-review` branch only. Upstream-submit branches
+# stay clean so the config never leaks to FRRouting/frr.
+
+language: "en-US"
+early_access: false
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  auto_review:
+    enabled: true
+    drafts: true
+    base_branches:
+      - staging-review
+
+  path_instructions:
+    - path: "lib/**/*.h"
+      instructions: |
+        Flag any user-configure `#ifdef HAVE_*` guard (e.g. HAVE_SQLITE3,
+        HAVE_LIBPCRE2_POSIX, HAVE_SYSREPO) being removed from a public
+        struct member. FRR's build model expects all components compiled
+        with the same `config.h`; "struct layout stability across configure
+        flags" is not a supported use case (ref: PR #21538 wontfix,
+        choppsv1 NACK 2026-04-21). OS-feature-detection guards
+        (HAVE_PROC_NET_DEV, HAVE_NET_RT_IFLIST, HAVE_NETNS) are a distinct
+        category and allowed.
+
+        Flag any new inline comment in a header that re-documents standard
+        library call semantics (listen(), read(), write(), memcpy(), etc.).
+        Reviewers expect readers to know libc (ref: PR #21514, choppsv1
+        requested removal of a listen() comment).
+
+    - path: "lib/mgmt_*.h"
+      instructions: |
+        Flag any new symbolic constant, macro, or enum added without at
+        least one in-tree caller in the same PR (ref: PR #21557 wontfix,
+        Jafaral NACK: "defines errors values but I don't see those used").
+        Header-only preparatory PRs require explicit justification and a
+        linked follow-up PR that introduces consumers.
+
+        Flag any `MGMT_MSG_ERR_*` or wire-protocol symbolic constant whose
+        value is a hardcoded errno integer (e.g. -74 for EBADMSG).
+        Errno numeric values are NOT portable across libcs: Darwin, Linux
+        glibc, musl, and FreeBSD all diverge. Hardcoding Linux values under
+        FRR-owned names is an error (ref: PR #21557, choppsv1 NACK
+        2026-04-21; empirical: 4/11 errno values diverge Darwin vs Linux
+        glibc). If a stable wire contract is needed, an FRR-owned enum
+        with local errno-to-enum translation is the correct shape.
+
+    - path: "mgmtd/**/*.c"
+      instructions: |
+        Flag any change to YANG list key definitions. Silently changing
+        keys breaks YANG NBC (non-backward-compat) for anyone configuring
+        FRR via direct YANG (ref: PR #21296, choppsv1 NACK).
+
+        Flag any duplication of an output function between JSON and
+        non-JSON variants. Single output path avoids drift bugs (ref:
+        choppsv1 pattern referenced in #21232).
+
+    - path: "doc/user/**"
+      instructions: |
+        Flag any DOC block that exceeds ~30 lines without a compelling
+        rationale in the commit body. donaldsharp rejected a 59-line DOC
+        block in #21557 as "stupidly over the top." Prefer linking to
+        docs.frrouting.org or keeping rationale in the commit message.
+
+    - path: "**/*.c"
+      instructions: |
+        Flag whitespace-only or cosmetic diff chunks mixed into a
+        functional PR (ref: PR #19480, #20031, #18436 — Jafaral repeatedly
+        requested drops of whitespace-only changes). Cosmetic fixes
+        belong in a separate commit or PR.
+
+        Flag the use of banned libc functions: `sprintf`, `strcat`,
+        `strcpy`, `inet_ntoa`, `ctime`. FRR requires `snprintf`,
+        `strlcat`, `strlcpy`, `inet_ntop`, `ctime_r` (ref: PR #18436,
+        Jafaral inline).
+
+  path_filters:
+    - "!tests/topotests/**/r*/*.conf"
+    - "!docs/**/*.rst"
+    - "!*.md"
+
+tone_instructions: |
+  Write as an engineer at a keyboard reviewing a colleague's patch.
+  Direct, technical, concise. Cite PR numbers or line refs when flagging
+  a known pattern. No emoji. Keep inline comments shorter than the diff
+  they reference.
+
+chat:
+  auto_reply: false
