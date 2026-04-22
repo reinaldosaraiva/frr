@@ -61,6 +61,14 @@ struct msg_conn;
 
 extern int mgmt_msg_connect(const char *path, size_t sendbuf, size_t recvbuf,
 			    const char *dbgtag);
+/*
+ * mgmt_msg_procbufs(): dispatch buffered input messages for a connection.
+ *
+ * `ms` must be the mstate member of an enclosing struct msg_conn (the
+ * implementation recovers the outer connection via container_of() to
+ * honour an in-handler msg_conn_disconnect() and stop dispatching the
+ * remainder of the batch).
+ */
 extern bool mgmt_msg_procbufs(struct mgmt_msg_state *ms,
 			      void (*handle_msg)(uint8_t version, uint8_t *msg,
 						 size_t msglen, void *user),
@@ -100,6 +108,7 @@ struct msg_conn {
 	bool is_short_circuit;	/* true when the message being handled is SC */
 	bool is_client;
 	bool debug;
+	bool stop_processing;	/* abort dispatch loop after an in-handler disconnect */
 };
 
 

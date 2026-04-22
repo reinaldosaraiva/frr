@@ -153,12 +153,15 @@ bool mgmt_msg_procbufs(struct mgmt_msg_state *ms,
 					  size_t msglen, void *user),
 		       void *user, bool debug)
 {
+	struct msg_conn *conn = container_of(ms, struct msg_conn, mstate);
 	const char *dbgtag = debug ? ms->idtag : NULL;
 	struct mgmt_msg_hdr *mhdr;
 	struct stream *work;
 	size_t left, nproc;
 
 	MGMT_MSG_TRACE(dbgtag, "Have %zu streams to process", ms->inq.count);
+
+	conn->stop_processing = false;
 
 	nproc = 0;
 	while (nproc < ms->max_read_buf) {
@@ -168,15 +171,21 @@ bool mgmt_msg_procbufs(struct mgmt_msg_state *ms,
 
 		left = stream_get_endp(work);
 		MGMT_MSG_TRACE(dbgtag, "Processing stream of len %zu", left);
-		/*
-		 * Q: if the handler disconnects should we stop/flush?
-		 */
+
 		mhdr = (struct mgmt_msg_hdr *)STREAM_DATA(work);
 		handle_msg(MGMT_MSG_MARKER_VERSION(mhdr->marker), (uint8_t *)(mhdr + 1),
 			   mhdr->len - sizeof(struct mgmt_msg_hdr), user);
 		ms->nrxm++;
 		nproc++;
 		stream_free(work); /* Free it up */
+
+		/*
+		 * If the handler closed the connection, stop dispatching:
+		 * remaining buffered messages may reference per-connection
+		 * state that the disconnect path already tore down.
+		 */
+		if (conn->stop_processing)
+			break;
 	}
 
 	/* return true if should reschedule b/c more to process. */
@@ -517,6 +526,28 @@ static void msg_conn_sched_proc_msgs(struct msg_conn *conn)
 
 void msg_conn_disconnect(struct msg_conn *conn, bool reconnect)
 {
+	struct stream *s;
+	struct stream *old_ins;
+
+	/*
+	 * Tear down procbufs state: signal the dispatch loop to abandon
+	 * any further buffered messages on this connection, drop the
+	 * queued input streams so the handler cannot be re-entered with
+	 * a stale user pointer, cancel any pending proc_msg_ev so a
+	 * scheduled dispatch does not fire after teardown, and recreate
+	 * mstate.ins so a partial frame buffered on the dead socket is
+	 * not prefixed to bytes from the next socket on reconnect (the
+	 * struct msg_conn is reused). Mirrors the symmetric cleanup in
+	 * msg_conn_cleanup().
+	 */
+	conn->stop_processing = true;
+	while ((s = stream_fifo_pop(&conn->mstate.inq)) != NULL)
+		if (s != conn->mstate.ins)
+			stream_free(s);
+	event_cancel(&conn->proc_msg_ev);
+	old_ins = conn->mstate.ins;
+	conn->mstate.ins = stream_new(conn->mstate.max_msg_sz);
+	stream_free(old_ins);
 
 	/* disconnect short-circuit if present */
 	if (conn->remote_conn) {
