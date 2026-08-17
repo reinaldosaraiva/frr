@@ -22,6 +22,10 @@ column, B3 O3 of NevoaSolutionsLtda/frr issue #17):
         validation with an explicit error instead of returning a
         false commit-OK.
 
+    reject -- Fase D triage decision (see REJECT_POLICY): same
+        reject-strict stubs as core, but the classification is a
+        per-family policy decision rather than MGC criticality.
+
     warn -- everything else. Config callbacks bind no-op stubs that
         return NB_OK and emit an aggregated log warning for
         programmatic writes.
@@ -41,6 +45,17 @@ import collections
 import os
 import re
 import sys
+
+# Explicitly rejected subtrees (Fase D of the gRPC-100 track: the
+# warn -> wired-ou-reject flip). A family lands here only after the
+# triage slice classifies it as reject (no wiring scope); wired
+# xpaths leave the table through tools/missing_cbs.tsv instead.
+# Every entry records the slice that triaged it and the rationale,
+# so the policy is reviewable in the git history of this file.
+REJECT_POLICY = [
+    # (xpath substring, triaged by, rationale)
+]
+REJECT_PATTERNS = [pat for pat, _slice, _why in REJECT_POLICY]
 
 WARN_OP_TO_CB = {
     "create": "bgp_nb_stub_create",
@@ -68,7 +83,11 @@ CORE_RE = re.compile(
 
 
 def classify(xpath: str) -> str:
-    return "core" if CORE_RE.search(xpath) else "warn"
+    if CORE_RE.search(xpath):
+        return "core"
+    if any(pat in xpath for pat in REJECT_PATTERNS):
+        return "reject"
+    return "warn"
 
 
 def main(tsv_path: str, out_path: str) -> int:
@@ -89,8 +108,10 @@ def main(tsv_path: str, out_path: str) -> int:
         print(f"no stub entries parsed from {tsv_path}", file=sys.stderr)
         return 1
 
-    n_core = sum(1 for x in by_xpath if classify(x) == "core")
-    n_warn = len(by_xpath) - n_core
+    classes = {x: classify(x) for x in by_xpath}
+    n_core = sum(1 for c in classes.values() if c == "core")
+    n_reject = sum(1 for c in classes.values() if c == "reject")
+    n_warn = len(by_xpath) - n_core - n_reject
 
     lines = []
     lines.append("/* SPDX-License-Identifier: GPL-2.0-or-later */")
@@ -105,8 +126,11 @@ def main(tsv_path: str, out_path: str) -> int:
     lines.append(" * nb_validate_callbacks() passes for the frr-bgp module")
     lines.append(" * tree. The trailing comment is the stub class column:")
     lines.append(" * core = reject-strict for programmatic clients,")
+    lines.append(" * reject = reject-strict per the Fase D policy")
+    lines.append(" *        (REJECT_POLICY in the generator),")
     lines.append(" * warn = NB_OK no-op with aggregated warning.")
-    lines.append(f" * Current population: {n_core} core, {n_warn} warn.")
+    lines.append(f" * Current population: {n_core} core, "
+                 f"{n_reject} reject, {n_warn} warn.")
     lines.append(" *")
     lines.append(" * Real handlers for any of these xpaths should be")
     lines.append(" * added to bgp_nb.c (above the #include of this file)")
@@ -119,7 +143,7 @@ def main(tsv_path: str, out_path: str) -> int:
         klass = classify(xpath)
         cb_lines = []
         for op in sorted(ops):
-            if klass == "core" and op in CORE_OP_TO_CB:
+            if klass in ("core", "reject") and op in CORE_OP_TO_CB:
                 cb = CORE_OP_TO_CB[op]
             else:
                 cb = WARN_OP_TO_CB[op]
@@ -134,7 +158,8 @@ def main(tsv_path: str, out_path: str) -> int:
     with open(out_path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
     print(f"wrote {out_path}: {len(by_xpath)} xpath stub entries "
-          f"({n_core} core, {n_warn} warn)", file=sys.stderr)
+          f"({n_core} core, {n_reject} reject, {n_warn} warn)",
+          file=sys.stderr)
     return 0
 
 
