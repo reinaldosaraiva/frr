@@ -727,6 +727,31 @@ int bgp_bmp_monitor_pre_policy_modify(struct nb_cb_modify_args *args);
 int bgp_bmp_monitor_post_policy_modify(struct nb_cb_modify_args *args);
 int bgp_bmp_monitor_loc_rib_modify(struct nb_cb_modify_args *args);
 
+int bgp_bmp_target_list_create(struct nb_cb_create_args *args);
+int bgp_bmp_target_list_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_af_list_create(struct nb_cb_create_args *args);
+int bgp_bmp_af_list_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_mirror_buffer_limit_modify(struct nb_cb_modify_args *args);
+int bgp_bmp_mirror_buffer_limit_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_import_vrf_create(struct nb_cb_create_args *args);
+int bgp_bmp_import_vrf_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_listener_create(struct nb_cb_create_args *args);
+int bgp_bmp_listener_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_connect_create(struct nb_cb_create_args *args);
+int bgp_bmp_connect_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_connect_min_retry_modify(struct nb_cb_modify_args *args);
+int bgp_bmp_connect_max_retry_modify(struct nb_cb_modify_args *args);
+int bgp_bmp_connect_srcif_modify(struct nb_cb_modify_args *args);
+int bgp_bmp_connect_srcif_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_ipv4_acl_modify(struct nb_cb_modify_args *args);
+int bgp_bmp_ipv4_acl_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_ipv6_acl_modify(struct nb_cb_modify_args *args);
+int bgp_bmp_ipv6_acl_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_mirror_modify(struct nb_cb_modify_args *args);
+int bgp_bmp_stats_time_modify(struct nb_cb_modify_args *args);
+int bgp_bmp_stats_time_destroy(struct nb_cb_destroy_args *args);
+int bgp_bmp_stats_experimental_modify(struct nb_cb_modify_args *args);
+
 #ifdef __cplusplus
 }
 #endif

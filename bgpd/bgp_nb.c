@@ -2446,10 +2446,22 @@ const struct frr_yang_module_info frr_bgp_info = {
  * the "bmp monitor <afi> <safi> <policy>" CLI onto the shared
  * bmp_monitor_apply() internal.
  */
-#define BGP_NB_BMP_MON_XPATH(_leaf)                                            \
+#define BGP_NB_BMP_MON_XPATH(_af, _leaf)                                       \
 	"/frr-routing:routing/control-plane-protocols/control-plane-protocol/" \
-	"frr-bgp:bgp/global/bmp-config/target-list/afi-safis/afi-safi/" \
-	"l2vpn-evpn/common-config/" _leaf
+	"frr-bgp:bgp/global/bmp-config/target-list/afi-safis/afi-safi/" _af   \
+	"/common-config/" _leaf
+/*
+ * bmp target lifecycle and knobs: one xpath per wired leaf of the
+ * bmp-config subtree (s061); the callbacks live in bgp_nb_config.c
+ * and reach the bgpd_bmp module through the bgp_nb_bmp_ops bridge.
+ */
+#define BGP_NB_BMP_CFG_XPATH(_leaf)                                            \
+	"/frr-routing:routing/control-plane-protocols/control-plane-protocol/" \
+	"frr-bgp:bgp/global/bmp-config" _leaf
+/* outgoing bmp sessions: long enough to deserve their own macro */
+#define BGP_NB_BMP_SES_XPATH(_leaf)                                            \
+	BGP_NB_BMP_CFG_XPATH(                                                   \
+		"/target-list/outgoing-session/session-list/" _leaf)
 		{ .xpath = BGP_NB_PL_XPATH("neighbors/neighbor", "ipv4-unicast",
 					   "direction-list"),
 		  .cbs = {
@@ -5535,17 +5547,187 @@ const struct frr_yang_module_info frr_bgp_info = {
 			  .cli_show = bgp_neighbor_af_upa_cli_show,
 		  } },
 
-		{ .xpath = BGP_NB_BMP_MON_XPATH("pre-policy"),
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l2vpn-evpn",
+					   "pre-policy"),
 		  .cbs = {
 			  .modify = bgp_bmp_monitor_pre_policy_modify,
 		  } },
-		{ .xpath = BGP_NB_BMP_MON_XPATH("post-policy"),
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l2vpn-evpn",
+					   "post-policy"),
 		  .cbs = {
 			  .modify = bgp_bmp_monitor_post_policy_modify,
 		  } },
-		{ .xpath = BGP_NB_BMP_MON_XPATH("loc-rib"),
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l2vpn-evpn",
+					   "loc-rib"),
 		  .cbs = {
 			  .modify = bgp_bmp_monitor_loc_rib_modify,
+		  } },
+
+		/* bmp monitor fanout: the remaining address families share
+		 * the l2vpn-evpn callbacks (afi/safi resolved from the
+		 * list key at runtime)
+		 */
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv4-unicast",
+				   "pre-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_pre_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv4-unicast",
+				   "post-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_post_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv4-unicast",
+				   "loc-rib"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_loc_rib_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv4-multicast",
+				   "pre-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_pre_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv4-multicast",
+				   "post-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_post_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv4-multicast",
+				   "loc-rib"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_loc_rib_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv6-unicast",
+				   "pre-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_pre_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv6-unicast",
+				   "post-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_post_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv6-unicast",
+				   "loc-rib"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_loc_rib_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv6-multicast",
+				   "pre-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_pre_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv6-multicast",
+				   "post-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_post_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("ipv6-multicast",
+				   "loc-rib"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_loc_rib_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l3vpn-ipv4-unicast",
+				   "pre-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_pre_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l3vpn-ipv4-unicast",
+				   "post-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_post_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l3vpn-ipv4-unicast",
+				   "loc-rib"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_loc_rib_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l3vpn-ipv6-unicast",
+				   "pre-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_pre_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l3vpn-ipv6-unicast",
+				   "post-policy"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_post_policy_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_MON_XPATH("l3vpn-ipv6-unicast",
+				   "loc-rib"),
+		  .cbs = {
+			  .modify = bgp_bmp_monitor_loc_rib_modify,
+		  } },
+
+		/* bmp target lifecycle and knobs */
+		{ .xpath = BGP_NB_BMP_CFG_XPATH("/mirror-buffer-limit"),
+		  .cbs = {
+			  .modify  = bgp_bmp_mirror_buffer_limit_modify,
+			  .destroy = bgp_bmp_mirror_buffer_limit_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH("/target-list"),
+		  .cbs = {
+			  .create  = bgp_bmp_target_list_create,
+			  .destroy = bgp_bmp_target_list_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH(
+			  "/target-list/afi-safis/afi-safi"),
+		  .cbs = {
+			  .create  = bgp_bmp_af_list_create,
+			  .destroy = bgp_bmp_af_list_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH("/target-list/import-vrf"),
+		  .cbs = {
+			  .create  = bgp_bmp_import_vrf_create,
+			  .destroy = bgp_bmp_import_vrf_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH(
+			  "/target-list/incoming-session/session-list"),
+		  .cbs = {
+			  .create  = bgp_bmp_listener_create,
+			  .destroy = bgp_bmp_listener_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH(
+			  "/target-list/outgoing-session/session-list"),
+		  .cbs = {
+			  .create  = bgp_bmp_connect_create,
+			  .destroy = bgp_bmp_connect_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_SES_XPATH("min-retry-time"),
+		  .cbs = {
+			  .modify = bgp_bmp_connect_min_retry_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_SES_XPATH("max-retry-time"),
+		  .cbs = {
+			  .modify = bgp_bmp_connect_max_retry_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_SES_XPATH("source-interface"),
+		  .cbs = {
+			  .modify  = bgp_bmp_connect_srcif_modify,
+			  .destroy = bgp_bmp_connect_srcif_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH("/target-list/ipv4-access-list"),
+		  .cbs = {
+			  .modify  = bgp_bmp_ipv4_acl_modify,
+			  .destroy = bgp_bmp_ipv4_acl_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH("/target-list/ipv6-access-list"),
+		  .cbs = {
+			  .modify  = bgp_bmp_ipv6_acl_modify,
+			  .destroy = bgp_bmp_ipv6_acl_destroy,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH("/target-list/mirror"),
+		  .cbs = {
+			  .modify = bgp_bmp_mirror_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH(
+			  "/target-list/stats-send-experimental"),
+		  .cbs = {
+			  .modify = bgp_bmp_stats_experimental_modify,
+		  } },
+		{ .xpath = BGP_NB_BMP_CFG_XPATH("/target-list/stats-time"),
+		  .cbs = {
+			  .modify  = bgp_bmp_stats_time_modify,
+			  .destroy = bgp_bmp_stats_time_destroy,
 		  } },
 		{
 			.xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/peer-groups/peer-group/ipv4-listen-range",

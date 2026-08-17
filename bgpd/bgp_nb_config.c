@@ -10563,18 +10563,22 @@ int bgp_global_evpn_vni_flooding_modify(struct nb_cb_modify_args *args)
  * bgp_bmp.c is a dlopen module: it cannot be linked from here, so it
  * publishes its internals through bgp_nb_bmp_ops at load time. While
  * the module is not loaded the commit fails with an explicit error.
- * The bmp target group must also already exist in bgpd (created with
- * the legacy CLI -- NB_CLIENT_CLI seeding rationale, same as
- * unnumbered neighbors): a commit against a missing group fails with
- * an explicit error instead of a silent no-op.
+ * Since s061 the target group no longer needs to pre-exist: the
+ * target-list create is wired, so a leaf commit creates the group on
+ * demand (the create applies before the leaf, pre-order). The CLI
+ * seeding flow still works (get_target is get-or-create).
  */
 struct bgp_nb_bmp_ops bgp_nb_bmp_ops;
 
+static bool bgp_nb_bmp_module_loaded(char *errmsg, size_t errmsg_len);
+
 /*
  * Resolve the bmp target group and afi/safi for one monitor leaf.
- * Read-only, so it runs at VALIDATE -- rejecting bad commits before
- * any partial APPLY of a multi-change commit -- and again at APPLY.
- * Returns 0 with *bt_out/*afi_out/*safi_out filled, -1 with errmsg.
+ * Read-only; runs at APPLY (s061: since the target-list create is
+ * wired, a leaf commit creates the group on demand, so a missing
+ * target at VALIDATE is no longer an error -- the create applies
+ * first, pre-order). Returns 0 with *bt_out/*afi_out/*safi_out
+ * filled, -1 with errmsg.
  */
 static int bgp_nb_bmp_afimon_resolve(struct nb_cb_modify_args *args,
 				     afi_t *afi_out, safi_t *safi_out,
@@ -10623,8 +10627,7 @@ static int bgp_nb_bmp_afimon_resolve(struct nb_cb_modify_args *args,
 
 	bt = bgp_nb_bmp_ops.find_target(bgp, name);
 	if (!bt) {
-		snprintfrr(args->errmsg, args->errmsg_len,
-			   "bmp targets %s not found (create it with the CLI first)",
+		snprintfrr(args->errmsg, args->errmsg_len, "bmp targets %s not found",
 			   name);
 		return -1;
 	}
@@ -10644,7 +10647,7 @@ static int bgp_nb_bmp_afimon_modify(struct nb_cb_modify_args *args,
 
 	switch (args->event) {
 	case NB_EV_VALIDATE:
-		if (bgp_nb_bmp_afimon_resolve(args, &afi, &safi, &bt) < 0)
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
 			return NB_ERR_VALIDATION;
 		return NB_OK;
 	case NB_EV_PREPARE:
@@ -10675,4 +10678,728 @@ int bgp_bmp_monitor_post_policy_modify(struct nb_cb_modify_args *args)
 int bgp_bmp_monitor_loc_rib_modify(struct nb_cb_modify_args *args)
 {
 	return bgp_nb_bmp_afimon_modify(args, BMP_MON_LOC_RIB);
+}
+
+/* ==== bmp target lifecycle and knobs (s061) ==== */
+
+/*
+ * The bmp callbacks below resolve the owning bgp instance and bmp
+ * target by walking the datastore parents by name (no hardcoded
+ * depths) and apply the change through the bgp_nb_bmp_ops bridge:
+ * bgp_bmp.c is a dlopen module and cannot be linked from here.
+ * VALIDATE only probes the bridge (all ops pointers are published
+ * atomically by the module init, so probing the s060 pair is
+ * enough -- all ops are assigned as one block by the module
+ * init and FRR never dlcloses a loaded module); the target
+ * resolution runs at APPLY. A leaf commit
+ * against a target that does not exist creates the target: the
+ * datastore ancestors apply first (pre-order), so by the time the
+ * leaf applies the target exists -- no pre-creation is needed and
+ * no partial apply can happen (create-on-demand, s061).
+ */
+static bool bgp_nb_bmp_module_loaded(char *errmsg, size_t errmsg_len)
+{
+	if (!bgp_nb_bmp_ops.find_target || !bgp_nb_bmp_ops.monitor_apply) {
+		snprintfrr(errmsg, errmsg_len,
+			   "bmp: the bgpd_bmp module is not loaded");
+		return false;
+	}
+	return true;
+}
+
+static struct bgp *bgp_nb_bmp_bgp_lookup(const struct lyd_node *dnode,
+					 char *errmsg, size_t errmsg_len)
+{
+	const struct lyd_node *cpp;
+	const char *vrf_key;
+	struct bgp *bgp;
+
+	cpp = yang_dnode_get_parent(dnode, "control-plane-protocol");
+	if (!cpp) {
+		snprintfrr(errmsg, errmsg_len, "bmp: missing control-plane-protocol");
+		return NULL;
+	}
+	vrf_key = yang_dnode_get_string(cpp, "vrf");
+	if (!bgp_lookup_by_name(bgp_nb_vrf_to_name(vrf_key))) {
+		snprintfrr(errmsg, errmsg_len,
+			   "bmp: bgp instance not found");
+		return NULL;
+	}
+	return bgp_lookup_by_name(bgp_nb_vrf_to_name(vrf_key));
+}
+
+static struct bmp_targets *bgp_nb_bmp_target_lookup(
+	const struct lyd_node *dnode, char *errmsg, size_t errmsg_len)
+{
+	const struct lyd_node *target_entry;
+	const char *name;
+	struct bgp *bgp;
+	struct bmp_targets *bt;
+
+	target_entry = yang_dnode_get_parent(dnode, "target-list");
+	if (!target_entry) {
+		snprintfrr(errmsg, errmsg_len, "bmp: missing bmp target-list");
+		return NULL;
+	}
+	name = yang_dnode_get_string(target_entry, "target-name");
+	bgp = bgp_nb_bmp_bgp_lookup(target_entry, errmsg, errmsg_len);
+	if (!bgp)
+		return NULL;
+	bt = bgp_nb_bmp_ops.find_target(bgp, name);
+	if (!bt)
+		snprintfrr(errmsg, errmsg_len, "bmp targets %s not found",
+			   name);
+	return bt;
+}
+
+/*
+ * bmp target-list lifecycle: create wires bmp_targets_get (the same
+ * get-or-create the CLI uses), destroy wires bmp_targets_put.
+ * Destroy stays tolerant of a missing runtime target: it only has
+ * to clean up, and legacy CLI-created targets are not tracked by
+ * the datastore.
+ */
+int bgp_bmp_target_list_create(struct nb_cb_create_args *args)
+{
+	struct bgp *bgp;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		/* module probe only: VALIDATEs run before ANY apply, so
+		 * a transaction creating the bgp instance (local-as)
+		 * together with bmp nodes must not need the runtime
+		 * instance here (r2 B-1); the lookup stays at APPLY
+		 */
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bgp = bgp_nb_bmp_bgp_lookup(args->dnode, args->errmsg,
+				    args->errmsg_len);
+	if (!bgp)
+		return NB_ERR;
+	bgp_nb_bmp_ops.get_target(
+		bgp, yang_dnode_get_string(args->dnode, "target-name"));
+	return NB_OK;
+}
+
+int bgp_bmp_target_list_destroy(struct nb_cb_destroy_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		/* nothing to clean up on the runtime side */
+		return NB_OK;
+	bgp_nb_bmp_ops.put_target(bt);
+	return NB_OK;
+}
+
+/*
+ * The afi-safi list entry of a bmp target carries no runtime state
+ * of its own (the state lives in the monitor leaves); destroying
+ * one clears any monitor flags still set through the same
+ * monitor_apply internal the leaves use.
+ */
+int bgp_bmp_af_list_create(struct nb_cb_create_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+	case NB_EV_APPLY:
+		return NB_OK;
+	}
+
+	return NB_OK;
+}
+
+int bgp_bmp_af_list_destroy(struct nb_cb_destroy_args *args)
+{
+	struct bmp_targets *bt;
+	const char *afi_safi_id;
+	afi_t afi;
+	safi_t safi;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_OK;
+	afi_safi_id = yang_dnode_get_string(args->dnode, "afi-safi-name");
+	if (bgp_nb_af_id_to_afi_safi(afi_safi_id, &afi, &safi) < 0) {
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "bmp: unknown afi-safi %s", afi_safi_id);
+		return NB_ERR;
+	}
+	bgp_nb_bmp_ops.monitor_apply(bt, afi, safi, BMP_MON_PREPOLICY,
+				     false);
+	bgp_nb_bmp_ops.monitor_apply(bt, afi, safi, BMP_MON_POSTPOLICY,
+				     false);
+	bgp_nb_bmp_ops.monitor_apply(bt, afi, safi, BMP_MON_LOC_RIB,
+				     false);
+	return NB_OK;
+}
+
+/* global mirror-buffer-limit: no bmp target involved */
+int bgp_bmp_mirror_buffer_limit_modify(struct nb_cb_modify_args *args)
+{
+	struct bgp *bgp;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		/* module probe only (r2 B-1): lookup at APPLY */
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bgp = bgp_nb_bmp_bgp_lookup(args->dnode, args->errmsg,
+				    args->errmsg_len);
+	if (!bgp)
+		return NB_ERR;
+	bgp_nb_bmp_ops.mirror_limit_set(
+		bgp, yang_dnode_get_uint32(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bgp_bmp_mirror_buffer_limit_destroy(struct nb_cb_destroy_args *args)
+{
+	struct bgp *bgp;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bgp = bgp_nb_bmp_bgp_lookup(args->dnode, args->errmsg,
+				    args->errmsg_len);
+	if (!bgp)
+		return NB_ERR;
+	/* "no bmp mirror buffer-limit" maps to unlimited */
+	bgp_nb_bmp_ops.mirror_limit_set(bgp, ~0UL);
+	return NB_OK;
+}
+
+/* import-vrf leaf-list entries */
+int bgp_bmp_import_vrf_create(struct nb_cb_create_args *args)
+{
+	const struct lyd_node *cpp;
+	struct bmp_targets *bt;
+	const char *own_name;
+	const char *vrfname;
+	int ret;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		/* The own-instance mistake is knowable from the
+		 * datastore alone (leaf value vs the enclosing
+		 * control-plane-protocol vrf key): reject it at
+		 * VALIDATE, before the on-demand target create
+		 * applies and orphans a runtime target. Mirrors the
+		 * runtime check of bmp_import_vrf_apply (-1).
+		 */
+		cpp = yang_dnode_get_parent(args->dnode,
+					    "control-plane-protocol");
+		if (!cpp) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "bmp: missing control-plane-protocol");
+			return NB_ERR_VALIDATION;
+		}
+		own_name = bgp_nb_vrf_to_name(
+			yang_dnode_get_string(cpp, "vrf"));
+		vrfname = yang_dnode_get_string(args->dnode, NULL);
+		if (!vrfname || !vrfname[0]) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "bmp: empty import-vrf-view name");
+			return NB_ERR_VALIDATION;
+		}
+		if ((own_name == NULL && vrfname == NULL) ||
+		    (own_name && vrfname &&
+		     strmatch(vrfname, own_name))) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "bmp: cannot import our own BGP instance");
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	ret = bgp_nb_bmp_ops.import_vrf_set(
+		bt, yang_dnode_get_string(args->dnode, NULL), true);
+	if (ret == -3)
+		/* imported entry exists but its bgp is gone: keep the
+		 * runtime change consistent with the CLI (success)
+		 */
+		return NB_OK;
+	if (ret == -1)
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "bmp: cannot import our own BGP instance");
+	else if (ret == -4)
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "bmp: BGP instance not found");
+	if (ret < 0)
+		return NB_ERR;
+	return NB_OK;
+}
+
+int bgp_bmp_import_vrf_destroy(struct nb_cb_destroy_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_OK;
+	bgp_nb_bmp_ops.import_vrf_set(
+		bt, yang_dnode_get_string(args->dnode, NULL), false);
+	return NB_OK;
+}
+
+/* incoming (listener) session-list entries */
+int bgp_bmp_listener_create(struct nb_cb_create_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	if (bgp_nb_bmp_ops.listener_add(
+		    bt, yang_dnode_get_string(args->dnode, "address"),
+		    (uint16_t)yang_dnode_get_uint32(args->dnode, "tcp-port")) < 0) {
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "bmp listener: invalid address");
+		return NB_ERR;
+	}
+	return NB_OK;
+}
+
+int bgp_bmp_listener_destroy(struct nb_cb_destroy_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_OK;
+	bgp_nb_bmp_ops.listener_del(
+		bt, yang_dnode_get_string(args->dnode, "address"),
+		(uint16_t)yang_dnode_get_uint32(args->dnode, "tcp-port"));
+	return NB_OK;
+}
+
+/* outgoing (connect) session-list entries and their leaves */
+int bgp_bmp_connect_create(struct nb_cb_create_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	bgp_nb_bmp_ops.connect_add(
+		bt, yang_dnode_get_string(args->dnode, "hostname"),
+		(uint16_t)yang_dnode_get_uint32(args->dnode, "tcp-port"));
+	return NB_OK;
+}
+
+int bgp_bmp_connect_destroy(struct nb_cb_destroy_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_OK;
+	bgp_nb_bmp_ops.connect_del(
+		bt, yang_dnode_get_string(args->dnode, "hostname"),
+		(uint16_t)yang_dnode_get_uint32(args->dnode, "tcp-port"));
+	return NB_OK;
+}
+
+static int bgp_bmp_connect_leaf_apply(struct nb_cb_modify_args *args,
+				      bool min_retry)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	if (bgp_nb_bmp_ops.connect_retry_set(
+		    bt, yang_dnode_get_string(args->dnode, "../hostname"),
+		    (uint16_t)yang_dnode_get_uint32(args->dnode, "../tcp-port"),
+		    min_retry,
+		    yang_dnode_get_uint32(args->dnode, NULL)) < 0) {
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "bmp connect: session not found");
+		return NB_ERR;
+	}
+	return NB_OK;
+}
+
+int bgp_bmp_connect_min_retry_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_bmp_connect_leaf_apply(args, true);
+}
+
+int bgp_bmp_connect_max_retry_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_bmp_connect_leaf_apply(args, false);
+}
+
+int bgp_bmp_connect_srcif_modify(struct nb_cb_modify_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	if (bgp_nb_bmp_ops.connect_srcif_set(
+		    bt, yang_dnode_get_string(args->dnode, "../hostname"),
+		    (uint16_t)yang_dnode_get_uint32(args->dnode, "../tcp-port"),
+		    yang_dnode_get_string(args->dnode, NULL)) < 0) {
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "bmp connect: session not found");
+		return NB_ERR;
+	}
+	return NB_OK;
+}
+
+int bgp_bmp_connect_srcif_destroy(struct nb_cb_destroy_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_OK;
+	bgp_nb_bmp_ops.connect_srcif_set(
+		bt, yang_dnode_get_string(args->dnode, "../hostname"),
+		(uint16_t)yang_dnode_get_uint32(args->dnode, "../tcp-port"), NULL);
+	return NB_OK;
+}
+
+/* access-list knobs */
+static int bgp_bmp_acl_apply(struct nb_cb_modify_args *args, bool ipv6)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	bgp_nb_bmp_ops.acl_set(bt, ipv6,
+			       yang_dnode_get_string(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bgp_bmp_ipv4_acl_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_bmp_acl_apply(args, false);
+}
+
+int bgp_bmp_ipv6_acl_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_bmp_acl_apply(args, true);
+}
+
+static int bgp_bmp_acl_destroy(struct nb_cb_destroy_args *args, bool ipv6)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_OK;
+	bgp_nb_bmp_ops.acl_set(bt, ipv6, NULL);
+	return NB_OK;
+}
+
+int bgp_bmp_ipv4_acl_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_bmp_acl_destroy(args, false);
+}
+
+int bgp_bmp_ipv6_acl_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_bmp_acl_destroy(args, true);
+}
+
+/* mirror knob */
+int bgp_bmp_mirror_modify(struct nb_cb_modify_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	bgp_nb_bmp_ops.mirror_set(bt, yang_dnode_get_bool(args->dnode, NULL));
+	return NB_OK;
+}
+
+/* stats knobs */
+int bgp_bmp_stats_time_modify(struct nb_cb_modify_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	bgp_nb_bmp_ops.stats_interval_set(
+		bt, yang_dnode_get_uint32(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bgp_bmp_stats_time_destroy(struct nb_cb_destroy_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_OK;
+	/* no default in the model: destroy stops the stats timer */
+	bgp_nb_bmp_ops.stats_interval_set(bt, 0);
+	return NB_OK;
+}
+
+int bgp_bmp_stats_experimental_modify(struct nb_cb_modify_args *args)
+{
+	struct bmp_targets *bt;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!bgp_nb_bmp_module_loaded(args->errmsg, args->errmsg_len))
+			return NB_ERR_VALIDATION;
+		return NB_OK;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
+				      args->errmsg_len);
+	if (!bt)
+		return NB_ERR;
+	bgp_nb_bmp_ops.stats_experimental_set(
+		bt, yang_dnode_get_bool(args->dnode, NULL));
+	return NB_OK;
 }

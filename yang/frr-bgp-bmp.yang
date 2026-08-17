@@ -83,7 +83,9 @@ submodule frr-bgp-bmp {
         }
 
         leaf tcp-port {
-          type uint32;
+          type uint32 {
+            range "1..65535";
+          }
           description
             "TCP port to listen on for BMP incoming sessions.";
         }
@@ -108,7 +110,9 @@ submodule frr-bgp-bmp {
         }
 
         leaf tcp-port {
-          type uint32;
+          type uint32 {
+            range "1..65535";
+          }
           description
             "TCP port to connect to for BMP outgoing sessions.";
         }
