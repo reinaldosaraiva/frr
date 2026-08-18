@@ -11,7 +11,7 @@
  * reject = reject-strict per the Fase D policy
  *        (REJECT_POLICY in the generator),
  * warn = NB_OK no-op with aggregated warning.
- * Current population: 0 core, 0 reject, 271 warn.
+ * Current population: 0 core, 0 reject, 270 warn.
  *
  * Real handlers for any of these xpaths should be
  * added to bgp_nb.c (above the #include of this file)
@@ -559,5 +559,3 @@
   .cbs = { .destroy = bgp_nb_stub_destroy, .modify = bgp_nb_stub_modify, } }, /* class: warn */
 { .xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/sid-vpn-per-vrf-export/sid-index",
   .cbs = { .destroy = bgp_nb_stub_destroy, .modify = bgp_nb_stub_modify, } }, /* class: warn */
-{ .xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/neighbors/unnumbered-neighbor",
-  .cbs = { .create = bgp_nb_stub_create, .destroy = bgp_nb_stub_destroy, } }, /* class: warn */

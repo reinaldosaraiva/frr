@@ -24,7 +24,6 @@ create	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-b
 create	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/afi-safis/afi-safi/ipv6-unicast/vpn-config/sid-vpn-export/sid-auto
 create	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/default-afi-safi
 create	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/sid-vpn-per-vrf-export/sid-auto
-create	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/neighbors/unnumbered-neighbor
 destroy	/frr-bgp:bgp-daemon/advertisement-delay-time
 destroy	/frr-bgp:bgp-daemon/community-alias
 destroy	/frr-bgp:bgp-daemon/establish-wait-time
@@ -187,7 +186,6 @@ destroy	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-
 destroy	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/sid-vpn-per-vrf-export/sid-auto
 destroy	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/sid-vpn-per-vrf-export/sid-explicit
 destroy	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/sid-vpn-per-vrf-export/sid-index
-destroy	/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/neighbors/unnumbered-neighbor
 modify	/frr-bgp:bgp-daemon/advertisement-delay-time
 modify	/frr-bgp:bgp-daemon/community-alias/alias
 modify	/frr-bgp:bgp-daemon/establish-wait-time

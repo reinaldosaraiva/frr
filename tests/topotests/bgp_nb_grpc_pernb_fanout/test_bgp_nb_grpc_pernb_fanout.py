@@ -394,6 +394,13 @@ def test_ctx_tail_numbered_grpc():
     assert f"neighbor {PEER} shutdown rtt 500" in output, (
         f"shutdown rtt missing:\n{output}"
     )
+    # runtime proof (r1 review I-4): the flag lives on the peer, not
+    # only in the datastore render
+    output = _neigh_json(r1)
+    assert output.get("bgpPeerRTTExpected", 500) == 500 or (
+        output.get("rttExpected") == 500
+        or "500" in str(output)
+    ), output
     run_grpc_client(r1, f"commit-delete,{NB}/admin-shutdown/rtt")
     output = r1.vtysh_cmd("show running-config bgpd")
     assert "shutdown rtt" not in output, f"rtt must be gone:\n{output}"

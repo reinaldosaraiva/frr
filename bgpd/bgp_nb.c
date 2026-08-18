@@ -1175,7 +1175,7 @@ const struct frr_yang_module_info frr_bgp_info = {
 		{
 			.xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/neighbors/neighbor/admin-shutdown/rtt",
 			.cbs = {
-				.modify   = bgp_nb_stub_modify,
+				.modify   = bgp_peer_admin_shutdown_rtt_modify,
 				.destroy  = bgp_neighbor_admin_shutdown_rtt_destroy,
 				.cli_show = bgp_nb_handled_by_parent_cli_show,
 			},
@@ -5559,7 +5559,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 	"/frr-routing:routing/control-plane-protocols/control-plane-protocol/" \
 	"frr-bgp:bgp/" _ctx "/afi-safis/afi-safi/" _af "/" _leaf
 
-		/* neighbors/neighbor: fanout */
+		/*
+		 * neighbors/neighbor: fanout
+		 */
 		{ .xpath = BGP_NB_PEER_AF_XPATH("neighbors/neighbor", "ipv4-unicast",
 				   "add-paths/addpath-rx-paths-limit"),
 		  .cbs = {
@@ -6939,7 +6941,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 			  .cli_show = bgp_neighbor_af_upa_cli_show,
 		  } },
 
-		/* neighbors/unnumbered-neighbor: fanout */
+		/*
+		 * neighbors/unnumbered-neighbor: fanout
+		 */
 		{ .xpath = BGP_NB_PEER_AF_XPATH("neighbors/unnumbered-neighbor", "ipv4-unicast",
 				   "accept-own"),
 		  .cbs = {
@@ -9029,7 +9033,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 			  .cli_show = bgp_neighbor_af_upa_cli_show,
 		  } },
 
-		/* peer-groups/peer-group: fanout */
+		/*
+		 * peer-groups/peer-group: fanout
+		 */
 		{ .xpath = BGP_NB_PEER_AF_XPATH("peer-groups/peer-group", "ipv4-unicast",
 				   "accept-own"),
 		  .cbs = {
@@ -11307,7 +11313,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 		 * fatia-2 callbacks.
 		 */
 
-		/* neighbors/neighbor: af tail */
+		/*
+		 * neighbors/neighbor: af tail
+		 */
 		{ .xpath = BGP_NB_PEER_AF_XPATH("neighbors/neighbor", "ipv4-unicast",
 				   "default-originate/originate"),
 		  .cbs = {
@@ -11781,7 +11789,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 			  .destroy = bgp_neighbor_af_weight_destroy,
 		  } },
 
-		/* neighbors/unnumbered-neighbor: af tail */
+		/*
+		 * neighbors/unnumbered-neighbor: af tail
+		 */
 		{ .xpath = BGP_NB_PEER_AF_XPATH("neighbors/unnumbered-neighbor", "ipv4-unicast",
 				   "default-originate/originate"),
 		  .cbs = {
@@ -12624,7 +12634,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 			  .destroy = bgp_neighbor_af_weight_destroy,
 		  } },
 
-		/* peer-groups/peer-group: af tail */
+		/*
+		 * peer-groups/peer-group: af tail
+		 */
 		{ .xpath = BGP_NB_PEER_AF_XPATH("peer-groups/peer-group", "ipv4-unicast",
 				   "default-originate/originate"),
 		  .cbs = {
@@ -13420,7 +13432,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 	"/frr-routing:routing/control-plane-protocols/control-plane-protocol/" \
 	"frr-bgp:bgp/" _ctx "/" _leaf
 
-		/* neighbors/neighbor: context leaves */
+		/*
+		 * neighbors/neighbor: context leaves
+		 */
 		{ .xpath = BGP_NB_PEER_CTX_XPATH("neighbors/neighbor",
 				   "admin-shutdown/rtt-count"),
 		  .cbs = {
@@ -13539,7 +13553,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 			  .modify = bgp_peer_timers_keepalive_modify,
 		  } },
 
-		/* neighbors/unnumbered-neighbor: context leaves */
+		/*
+		 * neighbors/unnumbered-neighbor: context leaves
+		 */
 		{ .xpath = BGP_NB_PEER_CTX_XPATH("neighbors/unnumbered-neighbor",
 				   "admin-shutdown/enable"),
 		  .cbs = {
@@ -13893,7 +13909,9 @@ const struct frr_yang_module_info frr_bgp_info = {
 			  .modify = bgp_peer_v6only_modify,
 		  } },
 
-		/* peer-groups/peer-group: context leaves */
+		/*
+		 * peer-groups/peer-group: context leaves
+		 */
 		{ .xpath = BGP_NB_PEER_CTX_XPATH("peer-groups/peer-group",
 				   "admin-shutdown/enable"),
 		  .cbs = {
@@ -14226,19 +14244,24 @@ const struct frr_yang_module_info frr_bgp_info = {
 		 * s062 — afi-safi list lifecycle: create is
 		 * create-on-demand (S061 §2.8 semantics), destroy
 		 * deactivates the AFI/SAFI; `enabled` reuses the
-		 * S059 context-generic activation callbacks.
+		 * S059 context-generic activation callbacks. The
+		 * destroy runs children-first (DESTROY_RECURSE)
+		 * so the per-leaf destroys clean their runtime
+		 * state before the deactivation.
 		 */
 		{ .xpath = BGP_NB_PEER_CTX_XPATH("neighbors/neighbor",
 				   "afi-safis/afi-safi"),
 		  .cbs = {
 			  .create = bgp_peer_afi_safi_list_create,
 			  .destroy = bgp_peer_afi_safi_list_destroy,
+			  .flags = F_NB_CB_DESTROY_RECURSE,
 		  } },
 		{ .xpath = BGP_NB_PEER_CTX_XPATH("neighbors/unnumbered-neighbor",
 				   "afi-safis/afi-safi"),
 		  .cbs = {
 			  .create = bgp_peer_afi_safi_list_create,
 			  .destroy = bgp_peer_afi_safi_list_destroy,
+			  .flags = F_NB_CB_DESTROY_RECURSE,
 		  } },
 		{ .xpath = BGP_NB_PEER_CTX_XPATH("neighbors/unnumbered-neighbor",
 				   "afi-safis/afi-safi/enabled"),
@@ -14251,6 +14274,7 @@ const struct frr_yang_module_info frr_bgp_info = {
 		  .cbs = {
 			  .create = bgp_peer_afi_safi_list_create,
 			  .destroy = bgp_peer_afi_safi_list_destroy,
+			  .flags = F_NB_CB_DESTROY_RECURSE,
 		  } },
 		{ .xpath = BGP_NB_PEER_CTX_XPATH("peer-groups/peer-group",
 				   "afi-safis/afi-safi/enabled"),
@@ -14259,8 +14283,29 @@ const struct frr_yang_module_info frr_bgp_info = {
 			  .destroy = bgp_neighbor_af_enabled_destroy,
 		  } },
 
+		/*
+		 * unnumbered-neighbor list entry: the macro fixes the
+		 * shared prefix so the bare entry reuses it.
+		 */
+#define BGP_NB_UNNB_XPATH(_leaf)                                          \
+	"/frr-routing:routing/control-plane-protocols/control-plane-protocol/" \
+	"frr-bgp:bgp/neighbors/unnumbered-neighbor" _leaf
+
+		/*
+		 * s062 - unnumbered-neighbor list lifecycle: the list
+		 * create owns the interface peer-create (mirrors the
+		 * peer_conf_interface_get CLI path); destroy deletes
+		 * the peer.
+		 */
+		{ .xpath = BGP_NB_UNNB_XPATH(""),
+		  .cbs = {
+			  .create = bgp_unnumbered_neighbor_create,
+			  .destroy = bgp_unnumbered_neighbor_destroy,
+		  } },
+
 #undef BGP_NB_PEER_AF_XPATH
 #undef BGP_NB_PEER_CTX_XPATH
+#undef BGP_NB_UNNB_XPATH
 
 		{ .xpath = BGP_NB_BMP_MON_XPATH("l2vpn-evpn",
 					   "pre-policy"),
