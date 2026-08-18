@@ -21,6 +21,7 @@
 #include "bgpd/bgp_bfd.h"
 #include "bgpd/bgp_nb_bmp.h"
 #include "bgpd/bgp_conditional_adv.h"
+#include "bgpd/bgp_damp.h"
 #include "bgpd/bgp_fsm.h"
 #include "bgpd/bgp_ls.h"
 #include "bgpd/bgp_open.h"
@@ -4671,38 +4672,26 @@ int bgp_neighbor_timers_advertise_interval_destroy(
  * the container — fires once after all leaves in the transaction are
  * committed.
  */
+/* fatia-2 shared container applies (defined with the s062
+ * context-generic callbacks at the end of this file)
+ */
+static void bgp_nb_local_as_apply(const struct lyd_node *cnode,
+				  struct peer *peer);
+static void bgp_nb_timers_apply(const struct lyd_node *cnode,
+				struct peer *peer);
+static void bgp_nb_local_role_apply(const struct lyd_node *cnode,
+				    struct peer *peer);
+static void bgp_nb_bfd_options_apply(const struct lyd_node *cnode,
+				     struct peer *peer);
+
 void bgp_neighbor_local_as_apply_finish(struct nb_cb_apply_finish_args *args)
 {
 	struct peer *peer;
-	as_t as = 0;
-	bool no_prepend = false;
-	bool replace_as = false;
-	char as_buf[16] = "";
 
 	peer = bgp_nb_lookup_peer(args->dnode, "..", 4);
 	if (!peer)
 		return;
-
-	if (yang_dnode_exists(args->dnode, "local-as")) {
-		as = (as_t)yang_dnode_get_uint32(args->dnode, "local-as");
-		snprintfrr(as_buf, sizeof(as_buf), "%u", as);
-	}
-	if (yang_dnode_exists(args->dnode, "no-prepend"))
-		no_prepend = yang_dnode_get_bool(args->dnode, "no-prepend");
-	if (yang_dnode_exists(args->dnode, "replace-as"))
-		replace_as = yang_dnode_get_bool(args->dnode, "replace-as");
-
-	if (as == 0) {
-		/*
-		 * If the local-as leaf is absent the container is a noop —
-		 * the per-leaf no_prepend/replace_as modifiers are meaningful
-		 * only when local-as is set.
-		 */
-		return;
-	}
-
-	peer_local_as_set(peer, as, no_prepend, replace_as, false, as_buf);
-	return;
+	bgp_nb_local_as_apply(args->dnode, peer);
 }
 
 int bgp_neighbor_local_as_destroy(struct nb_cb_destroy_args *args)
@@ -4738,36 +4727,11 @@ void bgp_neighbor_bfd_options_apply_finish(
 	struct nb_cb_apply_finish_args *args)
 {
 	struct peer *peer;
-	bool enable;
 
 	peer = bgp_nb_lookup_peer(args->dnode, "..", 4);
 	if (!peer)
 		return;
-
-	enable = yang_dnode_exists(args->dnode, "enable") &&
-		 yang_dnode_get_bool(args->dnode, "enable");
-
-	if (!enable) {
-		bgp_peer_remove_bfd_config(peer);
-		return;
-	}
-
-	bgp_peer_configure_bfd(peer, true);
-	if (yang_dnode_exists(args->dnode, "detect-multiplier"))
-		peer->bfd_config->detection_multiplier =
-			yang_dnode_get_uint8(args->dnode, "detect-multiplier");
-	if (yang_dnode_exists(args->dnode, "required-min-rx"))
-		peer->bfd_config->min_rx =
-			yang_dnode_get_uint16(args->dnode, "required-min-rx");
-	if (yang_dnode_exists(args->dnode, "desired-min-tx"))
-		peer->bfd_config->min_tx =
-			yang_dnode_get_uint16(args->dnode, "desired-min-tx");
-	if (yang_dnode_exists(args->dnode, "check-cp-failure"))
-		peer->bfd_config->cbit =
-			yang_dnode_get_bool(args->dnode, "check-cp-failure");
-
-	bgp_peer_config_apply(peer, NULL);
-	return;
+	bgp_nb_bfd_options_apply(args->dnode, peer);
 }
 
 int bgp_neighbor_bfd_options_destroy(struct nb_cb_destroy_args *args)
@@ -5052,6 +5016,10 @@ static int bgp_nb_af_id_to_afi_safi(const char *afi_safi_id, afi_t *afi_out,
 		*afi_out = AFI_IP;  *safi_out = SAFI_UNREACH;
 	} else if (strstr(afi_safi_id, "ipv6-unreachability")) {
 		*afi_out = AFI_IP6; *safi_out = SAFI_UNREACH;
+	} else if (strstr(afi_safi_id, "link-state")) {
+		/* fork AF: fabric BGP-LS (draft-ietf-idr-bgp-ls-bgp-only-fabric) */
+		*afi_out = AFI_BGP_LS;
+		*safi_out = SAFI_BGP_LS;
 	} else {
 		return -1;
 	}
@@ -7385,7 +7353,8 @@ int bgp_neighbor_tcp_mss_modify(struct nb_cb_modify_args *args)
 	peer = bgp_nb_lookup_peer(args->dnode, "..", 4);
 	if (!peer)
 		return NB_ERR;
-	mss = yang_dnode_get_uint32(args->dnode, NULL);
+	/* the leaf is uint16 in the model; the uint32 read asserted */
+	mss = yang_dnode_get_uint16(args->dnode, NULL);
 	peer_tcp_mss_set(peer, mss);
 	return NB_OK;
 }
@@ -7422,35 +7391,11 @@ int bgp_neighbor_tcp_mss_destroy(struct nb_cb_destroy_args *args)
 void bgp_neighbor_local_role_apply_finish(struct nb_cb_apply_finish_args *args)
 {
 	struct peer *peer;
-	const char *role_str;
-	uint8_t role;
-	bool strict_mode = false;
 
 	peer = bgp_nb_lookup_peer(args->dnode, "..", 4);
 	if (!peer)
 		return;
-
-	if (yang_dnode_exists(args->dnode, "./role")) {
-		role_str = yang_dnode_get_string(args->dnode, "./role");
-		if (!strcmp(role_str, "provider"))
-			role = ROLE_PROVIDER;
-		else if (!strcmp(role_str, "rs-server"))
-			role = ROLE_RS_SERVER;
-		else if (!strcmp(role_str, "rs-client"))
-			role = ROLE_RS_CLIENT;
-		else if (!strcmp(role_str, "customer"))
-			role = ROLE_CUSTOMER;
-		else if (!strcmp(role_str, "peer"))
-			role = ROLE_PEER;
-		else
-			role = ROLE_UNDEFINED;
-
-		if (yang_dnode_exists(args->dnode, "./strict-mode"))
-			strict_mode = yang_dnode_get_bool(args->dnode,
-							  "./strict-mode");
-		peer_role_set(peer, role, strict_mode);
-	}
-	return;
+	bgp_nb_local_role_apply(args->dnode, peer);
 }
 
 int bgp_neighbor_local_role_destroy(struct nb_cb_destroy_args *args)
@@ -7528,24 +7473,11 @@ int bgp_neighbor_gr_disable_destroy(struct nb_cb_destroy_args *args)
 void bgp_neighbor_timers_apply_finish(struct nb_cb_apply_finish_args *args)
 {
 	struct peer *peer;
-	uint32_t keepalive = 0, holdtime = 0;
-	bool have_k = false, have_h = false;
 
 	peer = bgp_nb_lookup_peer(args->dnode, "..", 4);
 	if (!peer)
 		return;
-
-	if (yang_dnode_exists(args->dnode, "./keepalive")) {
-		keepalive = yang_dnode_get_uint16(args->dnode, "./keepalive");
-		have_k = true;
-	}
-	if (yang_dnode_exists(args->dnode, "./hold-time")) {
-		holdtime = yang_dnode_get_uint16(args->dnode, "./hold-time");
-		have_h = true;
-	}
-	if (have_k && have_h)
-		peer_timers_set(peer, keepalive, holdtime);
-	return;
+	bgp_nb_timers_apply(args->dnode, peer);
 }
 
 int bgp_neighbor_timers_destroy(struct nb_cb_destroy_args *args)
@@ -11401,5 +11333,2283 @@ int bgp_bmp_stats_experimental_modify(struct nb_cb_modify_args *args)
 		return NB_ERR;
 	bgp_nb_bmp_ops.stats_experimental_set(
 		bt, yang_dnode_get_bool(args->dnode, NULL));
+	return NB_OK;
+}
+
+/*
+ * =====================================================================
+ * s062 — Fase D fatia 2: per-neighbor families (peer-groups,
+ * unnumbered-neighbor, neighbors/neighbor) wired-ou-reject.
+ *
+ * Context-generic helpers + the leaf callbacks the three contexts
+ * share. Every VALIDATE returns NB_OK without touching runtime (rule
+ * B-1, S061): lookups live in APPLY where the ancestor pre-order
+ * guarantees the peer exists.
+ * =====================================================================
+ */
+
+/* ---- context entry lookup (probe the context list key) ------------ */
+
+static struct peer *bgp_nb_peer_ctx_entry_lookup(const struct lyd_node *ctx)
+{
+	struct bgp *bgp;
+	union sockunion su;
+	struct peer_group *group;
+
+	if (!ctx)
+		return NULL;
+
+	bgp = bgp_nb_lookup_from_dnode(ctx, 3);
+	if (!bgp)
+		return NULL;
+
+	if (yang_dnode_exists(ctx, "remote-address")) {
+		const char *remote = yang_dnode_get_string(ctx,
+							   "remote-address");
+		if (str2sockunion(remote, &su) == 0)
+			return peer_lookup(bgp, &su);
+		return NULL;
+	}
+	if (yang_dnode_exists(ctx, "interface"))
+		return peer_lookup_by_conf_if(
+			bgp, yang_dnode_get_string(ctx, "interface"));
+	if (yang_dnode_exists(ctx, "peer-group-name")) {
+		group = peer_group_lookup(
+			bgp, yang_dnode_get_string(ctx, "peer-group-name"));
+		return group ? group->conf : NULL;
+	}
+	return NULL;
+}
+
+/*
+ * Resolve the peer owning `dnode` from the context list entry at
+ * `ctx_rel` hops above it (".." for a direct leaf, "../.." for a leaf
+ * inside a container). Serves numbered, unnumbered and peer-group
+ * contexts (S059 probe pattern, hoisted from the afi-safi variant).
+ */
+static struct peer *bgp_nb_peer_from_ctx(const struct lyd_node *dnode,
+					 const char *ctx_rel)
+{
+	const struct lyd_node *ctx;
+
+	if (!dnode || !ctx_rel)
+		return NULL;
+	ctx = yang_dnode_get(dnode, ctx_rel);
+	if (!ctx)
+		return NULL;
+	return bgp_nb_peer_ctx_entry_lookup(ctx);
+}
+
+/* ---- shared container applies (numbered apply_finish bodies) ------ */
+
+static void bgp_nb_local_as_apply(const struct lyd_node *cnode,
+				  struct peer *peer)
+{
+	as_t as = 0;
+	bool no_prepend = false, replace_as = false, dual_as = false;
+	char as_buf[16] = "";
+
+	if (yang_dnode_exists(cnode, "local-as")) {
+		as = (as_t)yang_dnode_get_uint32(cnode, "local-as");
+		snprintfrr(as_buf, sizeof(as_buf), "%u", as);
+	}
+	if (yang_dnode_exists(cnode, "no-prepend"))
+		no_prepend = yang_dnode_get_bool(cnode, "no-prepend");
+	if (yang_dnode_exists(cnode, "replace-as"))
+		replace_as = yang_dnode_get_bool(cnode, "replace-as");
+	if (yang_dnode_exists(cnode, "dual-as"))
+		dual_as = yang_dnode_get_bool(cnode, "dual-as");
+
+	/*
+	 * Without local-as the container is a no-op: the modifier
+	 * leaves are meaningful only when the AS is set.
+	 */
+	if (as == 0)
+		return;
+	peer_local_as_set(peer, as, no_prepend, replace_as, dual_as, as_buf);
+}
+
+static void bgp_nb_timers_apply(const struct lyd_node *cnode,
+				struct peer *peer)
+{
+	if (yang_dnode_exists(cnode, "keepalive") &&
+	    yang_dnode_exists(cnode, "hold-time"))
+		peer_timers_set(peer,
+				yang_dnode_get_uint16(cnode, "keepalive"),
+				yang_dnode_get_uint16(cnode, "hold-time"));
+}
+
+static void bgp_nb_local_role_apply(const struct lyd_node *cnode,
+				    struct peer *peer)
+{
+	const char *role_str;
+	uint8_t role;
+	bool strict_mode = false;
+
+	if (!yang_dnode_exists(cnode, "role"))
+		return;
+	role_str = yang_dnode_get_string(cnode, "role");
+	if (!strcmp(role_str, "provider"))
+		role = ROLE_PROVIDER;
+	else if (!strcmp(role_str, "rs-server"))
+		role = ROLE_RS_SERVER;
+	else if (!strcmp(role_str, "rs-client"))
+		role = ROLE_RS_CLIENT;
+	else if (!strcmp(role_str, "customer"))
+		role = ROLE_CUSTOMER;
+	else if (!strcmp(role_str, "peer"))
+		role = ROLE_PEER;
+	else
+		role = ROLE_UNDEFINED;
+	if (yang_dnode_exists(cnode, "strict-mode"))
+		strict_mode = yang_dnode_get_bool(cnode, "strict-mode");
+	peer_role_set(peer, role, strict_mode);
+}
+
+static void bgp_nb_bfd_options_apply(const struct lyd_node *cnode,
+				     struct peer *peer)
+{
+	bool enable;
+
+	enable = yang_dnode_exists(cnode, "enable") &&
+		 yang_dnode_get_bool(cnode, "enable");
+
+	if (!enable) {
+		bgp_peer_remove_bfd_config(peer);
+		return;
+	}
+
+	bgp_peer_configure_bfd(peer, true);
+	if (yang_dnode_exists(cnode, "detect-multiplier"))
+		peer->bfd_config->detection_multiplier =
+			yang_dnode_get_uint8(cnode, "detect-multiplier");
+	if (yang_dnode_exists(cnode, "required-min-rx"))
+		peer->bfd_config->min_rx =
+			yang_dnode_get_uint16(cnode, "required-min-rx");
+	if (yang_dnode_exists(cnode, "desired-min-tx"))
+		peer->bfd_config->min_tx =
+			yang_dnode_get_uint16(cnode, "desired-min-tx");
+	if (yang_dnode_exists(cnode, "check-cp-failure"))
+		peer->bfd_config->cbit =
+			yang_dnode_get_bool(cnode, "check-cp-failure");
+	if (yang_dnode_exists(cnode, "strict-hold-time"))
+		peer->bfd_config->hold_time = yang_dnode_get_uint32(
+			cnode, "strict-hold-time");
+	if (yang_dnode_exists(cnode, "profile"))
+		strlcpy(peer->bfd_config->profile,
+			yang_dnode_get_string(cnode, "profile"),
+			sizeof(peer->bfd_config->profile));
+
+	bgp_peer_config_apply(peer, NULL);
+}
+
+/* ---- ctx-generic boolean peer-flag toggles ------------------------ */
+
+static int peer_flag_ctx_toggle_modify(struct nb_cb_modify_args *args,
+				       uint64_t flag, const char *ctx_rel)
+{
+	struct peer *peer;
+	int ret;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, ctx_rel);
+	if (!peer)
+		return NB_ERR;
+
+	if (yang_dnode_get_bool(args->dnode, NULL))
+		ret = peer_flag_set(peer, flag);
+	else
+		ret = peer_flag_unset(peer, flag);
+	return bgp_nb_setter_result(ret, args->errmsg, args->errmsg_len);
+}
+
+static int peer_flag_ctx_toggle_destroy(struct nb_cb_destroy_args *args,
+					uint64_t flag, const char *ctx_rel)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, ctx_rel);
+	if (!peer)
+		return NB_OK;
+
+	return bgp_nb_setter_result(peer_flag_unset(peer, flag),
+				    args->errmsg, args->errmsg_len);
+}
+
+#define BGP_PEER_CTX_FLAG_CB(_name, _flag, _rel)                               \
+	int bgp_peer_##_name##_modify(struct nb_cb_modify_args *args)          \
+	{                                                                      \
+		return peer_flag_ctx_toggle_modify(args, (_flag), (_rel));     \
+	}                                                                      \
+	int bgp_peer_##_name##_destroy(struct nb_cb_destroy_args *args)        \
+	{                                                                      \
+		return peer_flag_ctx_toggle_destroy(args, (_flag), (_rel));    \
+	}
+
+/* For leaves with a yang default: the framework never delivers destroy. */
+#define BGP_PEER_CTX_FLAG_MOD_CB(_name, _flag, _rel)                           \
+	int bgp_peer_##_name##_modify(struct nb_cb_modify_args *args)          \
+	{                                                                      \
+		return peer_flag_ctx_toggle_modify(args, (_flag), (_rel));     \
+	}
+
+BGP_PEER_CTX_FLAG_CB(aigp, PEER_FLAG_AIGP, "..")
+BGP_PEER_CTX_FLAG_CB(ip_transparent, PEER_FLAG_IP_TRANSPARENT, "..")
+BGP_PEER_CTX_FLAG_CB(extended_link_bandwidth,
+		     PEER_FLAG_EXTENDED_LINK_BANDWIDTH, "..")
+BGP_PEER_CTX_FLAG_CB(disable_link_bw_encoding_ieee,
+		     PEER_FLAG_DISABLE_LINK_BW_ENCODING_IEEE, "..")
+BGP_PEER_CTX_FLAG_CB(extended_optional_parameters,
+		     PEER_FLAG_EXTENDED_OPT_PARAMS, "..")
+BGP_PEER_CTX_FLAG_CB(send_nexthop_characteristics,
+		     PEER_FLAG_SEND_NHC_ATTRIBUTE, "..")
+BGP_PEER_CTX_FLAG_CB(as_loop_detection, PEER_FLAG_AS_LOOP_DETECTION, "..")
+BGP_PEER_CTX_FLAG_CB(rpki_strict, PEER_FLAG_RPKI_STRICT, "..")
+BGP_PEER_CTX_FLAG_CB(graceful_shutdown, PEER_FLAG_GRACEFUL_SHUTDOWN, "..")
+BGP_PEER_CTX_FLAG_CB(passive_mode, PEER_FLAG_PASSIVE, "..")
+BGP_PEER_CTX_FLAG_CB(solo, PEER_FLAG_LONESOUL, "..")
+BGP_PEER_CTX_FLAG_CB(enforce_first_as, PEER_FLAG_ENFORCE_FIRST_AS, "..")
+BGP_PEER_CTX_FLAG_CB(disable_connected_check,
+		     PEER_FLAG_DISABLE_CONNECTED_CHECK, "../..")
+BGP_PEER_CTX_FLAG_CB(capability_fqdn, PEER_FLAG_CAPABILITY_FQDN, "../..")
+BGP_PEER_CTX_FLAG_CB(capability_link_local,
+		     PEER_FLAG_CAPABILITY_LINK_LOCAL, "../..")
+BGP_PEER_CTX_FLAG_MOD_CB(capability_extended_nexthop,
+			 PEER_FLAG_CAPABILITY_ENHE, "../..")
+BGP_PEER_CTX_FLAG_CB(capability_dynamic, PEER_FLAG_DYNAMIC_CAPABILITY,
+		     "../..")
+BGP_PEER_CTX_FLAG_CB(capability_override, PEER_FLAG_OVERRIDE_CAPABILITY,
+		     "../..")
+BGP_PEER_CTX_FLAG_CB(capability_strict, PEER_FLAG_STRICT_CAP_MATCH,
+		     "../..")
+
+/*
+ * capability-negotiate: the leaf is true when negotiation is ON, the
+ * peer flag marks the "dont-capability-negotiate" negation.
+ */
+int bgp_peer_capability_negotiate_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	int ret;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+
+	if (yang_dnode_get_bool(args->dnode, NULL))
+		ret = peer_flag_unset(peer, PEER_FLAG_DONT_CAPABILITY);
+	else
+		ret = peer_flag_set(peer, PEER_FLAG_DONT_CAPABILITY);
+	return bgp_nb_setter_result(ret, args->errmsg, args->errmsg_len);
+}
+
+/*
+ * oad is a sub-sort selector, not a flag bit (mirrors the numbered
+ * bgp_neighbor_oad_modify body).
+ */
+int bgp_peer_oad_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	bool oad;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+	oad = yang_dnode_get_bool(args->dnode, NULL);
+	if (oad && peer->sort == BGP_PEER_EBGP)
+		peer->sub_sort = BGP_PEER_EBGP_OAD;
+	else
+		peer->sub_sort = 0;
+	return NB_OK;
+}
+
+/*
+ * software-version-capability enum: disabled / old-encoding /
+ * latest-encoding (mirrors the numbered callback body).
+ */
+int bgp_peer_capability_software_version_modify(
+	struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	const char *val;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+
+	val = yang_dnode_get_string(args->dnode, NULL);
+	if (strmatch(val, "old-encoding")) {
+		peer_flag_unset(peer, PEER_FLAG_CAPABILITY_SOFT_VERSION_NEW);
+		peer_flag_set(peer, PEER_FLAG_CAPABILITY_SOFT_VERSION_OLD);
+	} else if (strmatch(val, "latest-encoding")) {
+		peer_flag_unset(peer, PEER_FLAG_CAPABILITY_SOFT_VERSION_OLD);
+		peer_flag_set(peer, PEER_FLAG_CAPABILITY_SOFT_VERSION_NEW);
+	} else {
+		peer_flag_unset(peer, PEER_FLAG_CAPABILITY_SOFT_VERSION_OLD);
+		peer_flag_unset(peer, PEER_FLAG_CAPABILITY_SOFT_VERSION_NEW);
+	}
+	return NB_OK;
+}
+
+/* ---- graceful-restart trio (reads the sibling leaves) -------------- */
+
+static void bgp_nb_gr_apply(const struct lyd_node *cnode, struct peer *peer)
+{
+	bool enable = false, helper = false, disable = false;
+
+	if (yang_dnode_exists(cnode, "enable"))
+		enable = yang_dnode_get_bool(cnode, "enable");
+	if (yang_dnode_exists(cnode, "graceful-restart-helper"))
+		helper = yang_dnode_get_bool(cnode,
+					     "graceful-restart-helper");
+	if (yang_dnode_exists(cnode, "graceful-restart-disable"))
+		disable = yang_dnode_get_bool(cnode,
+					      "graceful-restart-disable");
+
+	if (disable) {
+		peer_flag_unset(peer, PEER_FLAG_GRACEFUL_RESTART);
+		peer_flag_unset(peer, PEER_FLAG_GRACEFUL_RESTART_HELPER);
+		return;
+	}
+	if (enable)
+		peer_flag_set(peer, PEER_FLAG_GRACEFUL_RESTART);
+	else
+		peer_flag_unset(peer, PEER_FLAG_GRACEFUL_RESTART);
+	if (helper)
+		peer_flag_set(peer, PEER_FLAG_GRACEFUL_RESTART_HELPER);
+	else
+		peer_flag_unset(peer, PEER_FLAG_GRACEFUL_RESTART_HELPER);
+}
+
+static int bgp_peer_gr_leaf_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	bgp_nb_gr_apply(
+		yang_dnode_get_parent(args->dnode, "graceful-restart"), peer);
+	return NB_OK;
+}
+
+int bgp_peer_gr_enable_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_gr_leaf_modify(args);
+}
+
+int bgp_peer_gr_helper_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_gr_leaf_modify(args);
+}
+
+int bgp_peer_gr_disable_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_gr_leaf_modify(args);
+}
+
+static int bgp_peer_gr_leaf_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	bgp_nb_gr_apply(
+		yang_dnode_get_parent(args->dnode, "graceful-restart"), peer);
+	return NB_OK;
+}
+
+int bgp_peer_gr_enable_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_gr_leaf_destroy(args);
+}
+
+int bgp_peer_gr_helper_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_gr_leaf_destroy(args);
+}
+
+int bgp_peer_gr_disable_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_gr_leaf_destroy(args);
+}
+
+/* ---- afi-safi list entry (per-neighbor contexts) ------------------- */
+
+/*
+ * create: the afi-safi list entry is created on demand by the first
+ * leaf commit (S061 create-on-demand semantics; mgmtd sees an empty
+ * diff for a bare list create).
+ */
+int bgp_peer_afi_safi_list_create(struct nb_cb_create_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+	case NB_EV_APPLY:
+		return NB_OK;
+	}
+	return NB_OK;
+}
+
+/*
+ * destroy: deactivate the AFI/SAFI on the peer (mirrors
+ * "no neighbor activate"); the child-leaf destroys run first in
+ * pre-order and own their own cleanup.
+ */
+int bgp_peer_afi_safi_list_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+	afi_t afi;
+	safi_t safi;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_ctx_lookup(args->dnode);
+	if (!peer)
+		return NB_OK;
+	if (bgp_nb_af_id_to_afi_safi(
+		    yang_dnode_get_string(args->dnode, "afi-safi-name"), &afi,
+		    &safi) < 0)
+		return NB_OK;
+	peer_deactivate(peer, afi, safi);
+	return NB_OK;
+}
+
+/* ---- per-AF: default-originate ------------------------------------ */
+
+static int bgp_nb_default_originate_apply(const struct lyd_node *dnode,
+					  char *errmsg, size_t errmsg_len)
+{
+	struct peer *peer;
+	afi_t afi;
+	safi_t safi;
+	const struct lyd_node *cnode;
+	const char *rmap = NULL;
+	struct route_map *map = NULL;
+
+	if (bgp_nb_peer_af_lookup(dnode, 2, &peer, &afi, &safi) < 0)
+		return NB_ERR;
+
+	cnode = yang_dnode_get_parent(dnode, "default-originate");
+	if (!cnode)
+		return NB_ERR;
+
+	if (!yang_dnode_exists(cnode, "originate") ||
+	    !yang_dnode_get_bool(cnode, "originate"))
+		return bgp_nb_setter_result(
+			peer_default_originate_unset(peer, afi, safi), errmsg,
+			errmsg_len);
+
+	if (yang_dnode_exists(cnode, "route-map")) {
+		rmap = yang_dnode_get_string(cnode, "route-map");
+		map = route_map_lookup_by_name(rmap); /* APPLY only (B-1) */
+	}
+	return bgp_nb_setter_result(
+		peer_default_originate_set(peer, afi, safi, rmap, map), errmsg,
+		errmsg_len);
+}
+
+int bgp_neighbor_af_default_originate_originate_modify(
+	struct nb_cb_modify_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_default_originate_apply(args->dnode, args->errmsg,
+					      args->errmsg_len);
+}
+
+int bgp_neighbor_af_default_originate_route_map_modify(
+	struct nb_cb_modify_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_default_originate_apply(args->dnode, args->errmsg,
+					      args->errmsg_len);
+}
+
+int bgp_neighbor_af_default_originate_route_map_destroy(
+	struct nb_cb_destroy_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_default_originate_apply(args->dnode, args->errmsg,
+					      args->errmsg_len);
+}
+
+/* ---- per-AF: weight ------------------------------------------------ */
+
+int bgp_neighbor_af_weight_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	afi_t afi;
+	safi_t safi;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	if (bgp_nb_peer_af_lookup(args->dnode, 2, &peer, &afi, &safi) < 0)
+		return NB_ERR;
+	return bgp_nb_setter_result(
+		peer_weight_set(
+			peer, afi, safi,
+			yang_dnode_get_uint16(args->dnode, NULL)),
+		args->errmsg, args->errmsg_len);
+}
+
+int bgp_neighbor_af_weight_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+	afi_t afi;
+	safi_t safi;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	if (bgp_nb_peer_af_lookup(args->dnode, 2, &peer, &afi, &safi) < 0)
+		return NB_OK;
+	return bgp_nb_setter_result(peer_weight_unset(peer, afi, safi),
+				    args->errmsg, args->errmsg_len);
+}
+
+/* ---- per-AF: route-flap dampening ---------------------------------- */
+
+static int bgp_nb_dampening_apply(const struct lyd_node *dnode,
+				  char *errmsg, size_t errmsg_len)
+{
+	struct peer *peer;
+	afi_t afi;
+	safi_t safi;
+	const struct lyd_node *cnode;
+	uint32_t half, reuse, suppress, max;
+	bool enable;
+
+	if (bgp_nb_peer_af_lookup(dnode, 2, &peer, &afi, &safi) < 0)
+		return NB_ERR;
+
+	cnode = yang_dnode_get_parent(dnode, "route-flap-dampening");
+	if (!cnode)
+		return NB_ERR;
+
+	enable = yang_dnode_exists(cnode, "enable") &&
+		 yang_dnode_get_bool(cnode, "enable");
+
+	if (!enable) {
+		bgp_peer_damp_disable(peer, afi, safi);
+		return NB_OK;
+	}
+
+	half = yang_dnode_exists(cnode, "reach-decay")
+		       ? yang_dnode_get_uint8(cnode, "reach-decay")
+		       : DEFAULT_HALF_LIFE;
+	reuse = yang_dnode_exists(cnode, "reuse-above")
+			? yang_dnode_get_uint16(cnode, "reuse-above")
+			: DEFAULT_REUSE;
+	suppress = yang_dnode_exists(cnode, "suppress-above")
+			   ? yang_dnode_get_uint16(cnode, "suppress-above")
+			   : DEFAULT_SUPPRESS;
+	max = yang_dnode_exists(cnode, "unreach-decay")
+		      ? yang_dnode_get_uint8(cnode, "unreach-decay")
+		      : 60;
+
+	if (suppress < reuse) {
+		snprintfrr(errmsg, errmsg_len,
+			   "suppress value cannot be less than reuse value");
+		return NB_ERR_VALIDATION;
+	}
+	bgp_peer_damp_enable(peer, afi, safi, half * 60, reuse, suppress,
+			     max * 60);
+	return NB_OK;
+}
+
+int bgp_neighbor_af_dampening_modify(struct nb_cb_modify_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_dampening_apply(args->dnode, args->errmsg,
+				      args->errmsg_len);
+}
+
+int bgp_neighbor_af_dampening_destroy(struct nb_cb_destroy_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_dampening_apply(args->dnode, args->errmsg,
+				      args->errmsg_len);
+}
+
+/* ---- per-AF: ORF capability (flag + capability send) --------------- */
+
+static int bgp_nb_orf_apply(struct nb_cb_modify_args *args, uint64_t flags)
+{
+	struct peer *peer;
+	afi_t afi;
+	safi_t safi;
+	int ret;
+
+	if (bgp_nb_peer_af_lookup(args->dnode, 2, &peer, &afi, &safi) < 0)
+		return NB_ERR;
+
+	if (yang_dnode_get_bool(args->dnode, NULL))
+		ret = peer_af_flag_set(peer, afi, safi, flags);
+	else
+		ret = peer_af_flag_unset(peer, afi, safi, flags);
+	if (ret == 0 && peer->connection)
+		bgp_capability_send(peer->connection, afi, safi,
+				    CAPABILITY_CODE_ORF, CAPABILITY_ACTION_SET);
+	return bgp_nb_setter_result(ret, args->errmsg, args->errmsg_len);
+}
+
+int bgp_neighbor_af_orf_send_modify(struct nb_cb_modify_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_orf_apply(args, PEER_FLAG_ORF_PREFIX_SM);
+}
+
+int bgp_neighbor_af_orf_receive_modify(struct nb_cb_modify_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_orf_apply(args, PEER_FLAG_ORF_PREFIX_RM);
+}
+
+int bgp_neighbor_af_orf_both_modify(struct nb_cb_modify_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_orf_apply(
+		args, PEER_FLAG_ORF_PREFIX_SM | PEER_FLAG_ORF_PREFIX_RM);
+}
+
+static int bgp_nb_orf_destroy(struct nb_cb_destroy_args *args,
+			      uint64_t flags)
+{
+	struct peer *peer;
+	afi_t afi;
+	safi_t safi;
+
+	if (bgp_nb_peer_af_lookup(args->dnode, 2, &peer, &afi, &safi) < 0)
+		return NB_OK;
+	return bgp_nb_setter_result(peer_af_flag_unset(peer, afi, safi, flags),
+				    args->errmsg, args->errmsg_len);
+}
+
+int bgp_neighbor_af_orf_send_destroy(struct nb_cb_destroy_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_orf_destroy(args, PEER_FLAG_ORF_PREFIX_SM);
+}
+
+int bgp_neighbor_af_orf_receive_destroy(struct nb_cb_destroy_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_orf_destroy(args, PEER_FLAG_ORF_PREFIX_RM);
+}
+
+int bgp_neighbor_af_orf_both_destroy(struct nb_cb_destroy_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	return bgp_nb_orf_destroy(
+		args, PEER_FLAG_ORF_PREFIX_SM | PEER_FLAG_ORF_PREFIX_RM);
+}
+
+/* ---- send-community extended rpki (completes the S059 set) --------- */
+
+BGP_NEIGHBOR_AF_FLAG_MOD_CB(send_ext_community_rpki,
+			    PEER_FLAG_SEND_EXT_COMMUNITY_RPKI, 3)
+
+/* ---- ctx: timers --------------------------------------------------- */
+
+static int bgp_peer_timers_leaf_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	bgp_nb_timers_apply(
+		yang_dnode_get_parent(args->dnode, "timers"), peer);
+	return NB_OK;
+}
+
+int bgp_peer_timers_keepalive_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_timers_leaf_modify(args);
+}
+
+int bgp_peer_timers_hold_time_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_timers_leaf_modify(args);
+}
+
+int bgp_peer_timers_connect_time_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	return bgp_nb_setter_result(
+		peer_timers_connect_set(
+			peer, yang_dnode_get_uint16(args->dnode, NULL)),
+		args->errmsg, args->errmsg_len);
+}
+
+int bgp_peer_timers_connect_time_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_timers_connect_unset(peer);
+	return NB_OK;
+}
+
+int bgp_peer_timers_advertise_interval_modify(
+	struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	return bgp_nb_setter_result(
+		peer_advertise_interval_set(
+			peer, yang_dnode_get_uint16(args->dnode, NULL)),
+		args->errmsg, args->errmsg_len);
+}
+
+int bgp_peer_timers_advertise_interval_destroy(
+	struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_advertise_interval_unset(peer);
+	return NB_OK;
+}
+
+int bgp_peer_timers_delayopen_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	return bgp_nb_setter_result(
+		peer_timers_delayopen_set(
+			peer, yang_dnode_get_uint16(args->dnode, NULL)),
+		args->errmsg, args->errmsg_len);
+}
+
+int bgp_peer_timers_delayopen_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_timers_delayopen_unset(peer);
+	return NB_OK;
+}
+
+/* ---- ctx: local-as / local-role (container applies) ---------------- */
+
+static int bgp_peer_local_as_leaf_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	bgp_nb_local_as_apply(
+		yang_dnode_get_parent(args->dnode, "local-as"), peer);
+	return NB_OK;
+}
+
+int bgp_peer_local_as_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_local_as_leaf_modify(args);
+}
+
+int bgp_peer_local_as_no_prepend_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_local_as_leaf_modify(args);
+}
+
+int bgp_peer_local_as_replace_as_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_local_as_leaf_modify(args);
+}
+
+int bgp_peer_local_as_dual_as_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_local_as_leaf_modify(args);
+}
+
+int bgp_peer_local_as_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_local_as_unset(peer);
+	return NB_OK;
+}
+
+static int bgp_peer_local_role_leaf_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	bgp_nb_local_role_apply(
+		yang_dnode_get_parent(args->dnode, "local-role"), peer);
+	return NB_OK;
+}
+
+int bgp_peer_local_role_role_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_local_role_leaf_modify(args);
+}
+
+int bgp_peer_local_role_strict_mode_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_local_role_leaf_modify(args);
+}
+
+int bgp_peer_local_role_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_role_unset(peer);
+	return NB_OK;
+}
+
+/* ---- ctx: bfd-options leaves (container apply) --------------------- */
+
+static int bgp_peer_bfd_leaf_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	bgp_nb_bfd_options_apply(
+		yang_dnode_get_parent(args->dnode, "bfd-options"), peer);
+	return NB_OK;
+}
+
+int bgp_peer_bfd_enable_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_bfd_leaf_modify(args);
+}
+
+int bgp_peer_bfd_profile_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_bfd_leaf_modify(args);
+}
+
+int bgp_peer_bfd_detect_multiplier_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_bfd_leaf_modify(args);
+}
+
+int bgp_peer_bfd_required_min_rx_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_bfd_leaf_modify(args);
+}
+
+int bgp_peer_bfd_desired_min_tx_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_bfd_leaf_modify(args);
+}
+
+int bgp_peer_bfd_check_cp_failure_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_bfd_leaf_modify(args);
+}
+
+int bgp_peer_bfd_strict_mode_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_bfd_leaf_modify(args);
+}
+
+int bgp_peer_bfd_strict_hold_time_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_bfd_leaf_modify(args);
+}
+
+static int bgp_peer_bfd_leaf_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	bgp_nb_bfd_options_apply(
+		yang_dnode_get_parent(args->dnode, "bfd-options"), peer);
+	return NB_OK;
+}
+
+int bgp_peer_bfd_profile_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_bfd_leaf_destroy(args);
+}
+
+int bgp_peer_bfd_strict_hold_time_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_bfd_leaf_destroy(args);
+}
+
+/* ---- ctx: description / password / tcp-mss / ttl-security ---------- */
+
+int bgp_peer_description_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+	peer_description_set(peer, yang_dnode_get_string(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bgp_peer_description_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_OK;
+	peer_description_unset(peer);
+	return NB_OK;
+}
+
+int bgp_peer_password_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	const char *pwd;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+	pwd = yang_dnode_get_string(args->dnode, NULL);
+	if (pwd && *pwd)
+		return bgp_nb_setter_result(
+			peer_password_set(peer, pwd), args->errmsg,
+			args->errmsg_len);
+	peer_password_unset(peer);
+	return NB_OK;
+}
+
+int bgp_peer_password_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_OK;
+	peer_password_unset(peer);
+	return NB_OK;
+}
+
+int bgp_peer_tcp_mss_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+	peer_tcp_mss_set(peer, yang_dnode_get_uint16(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bgp_peer_tcp_mss_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_OK;
+	peer_tcp_mss_set(peer, 0);
+	return NB_OK;
+}
+
+int bgp_peer_ttl_security_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+	if (peer_ttl_security_hops_set(
+		    peer, yang_dnode_get_uint8(args->dnode, NULL)) != 0) {
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "peer_ttl_security_hops_set failed");
+		return NB_ERR;
+	}
+	return NB_OK;
+}
+
+int bgp_peer_ttl_security_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_OK;
+	peer_ttl_security_hops_unset(peer);
+	return NB_OK;
+}
+
+/* ---- ctx: ebgp-multihop -------------------------------------------- */
+
+int bgp_peer_ebgp_multihop_enabled_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	if (yang_dnode_get_bool(args->dnode, NULL)) {
+		uint8_t ttl = 255;
+
+		if (yang_dnode_exists(args->dnode, "../multihop-ttl"))
+			ttl = yang_dnode_get_uint8(args->dnode,
+						   "../multihop-ttl");
+		return bgp_nb_setter_result(
+			peer_ebgp_multihop_set(peer, ttl, true), args->errmsg,
+			args->errmsg_len);
+	}
+	return bgp_nb_setter_result(peer_ebgp_multihop_unset(peer, true),
+				    args->errmsg, args->errmsg_len);
+}
+
+int bgp_peer_ebgp_multihop_ttl_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	return bgp_nb_setter_result(
+		peer_ebgp_multihop_set(
+			peer, yang_dnode_get_uint8(args->dnode, NULL), true),
+		args->errmsg, args->errmsg_len);
+}
+
+/* ---- ctx: update-source -------------------------------------------- */
+
+int bgp_peer_update_source_ip_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	union sockunion su;
+	const char *src;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	src = yang_dnode_get_string(args->dnode, NULL);
+	if (str2sockunion(src, &su) < 0) {
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "invalid update-source address %s", src);
+		return NB_ERR_VALIDATION;
+	}
+	peer_update_source_addr_set(peer, &su);
+	return NB_OK;
+}
+
+int bgp_peer_update_source_ip_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_update_source_unset(peer);
+	return NB_OK;
+}
+
+int bgp_peer_update_source_interface_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	if (peer_update_source_if_set(
+		    peer, yang_dnode_get_string(args->dnode, NULL)) != 0) {
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "peer_update_source_if_set failed");
+		return NB_ERR;
+	}
+	return NB_OK;
+}
+
+int bgp_peer_update_source_interface_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_update_source_unset(peer);
+	return NB_OK;
+}
+
+/* ---- ctx: admin-shutdown family ------------------------------------ */
+
+/*
+ * enable: mirror of the CLI peer_flag_modify_vty shutdown handling —
+ * disabling also clears the RFC 8203 communication message.
+ */
+int bgp_peer_admin_shutdown_enable_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	int ret;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	if (yang_dnode_get_bool(args->dnode, NULL)) {
+		ret = peer_flag_set(peer, PEER_FLAG_SHUTDOWN);
+	} else {
+		peer_tx_shutdown_message_unset(peer);
+		ret = peer_flag_unset(peer, PEER_FLAG_SHUTDOWN);
+	}
+	return bgp_nb_setter_result(ret, args->errmsg, args->errmsg_len);
+}
+
+int bgp_peer_admin_shutdown_message_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	peer_tx_shutdown_message_set(
+		peer, yang_dnode_get_string(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bgp_peer_admin_shutdown_message_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_tx_shutdown_message_unset(peer);
+	return NB_OK;
+}
+
+int bgp_peer_admin_shutdown_rtt_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	peer->rtt_expected = yang_dnode_get_uint16(args->dnode, NULL);
+	peer_flag_set(peer, PEER_FLAG_RTT_SHUTDOWN);
+	return NB_OK;
+}
+
+int bgp_peer_admin_shutdown_rtt_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_flag_unset(peer, PEER_FLAG_RTT_SHUTDOWN);
+	peer->rtt_expected = 0;
+	peer->rtt_keepalive_conf = 1;
+	return NB_OK;
+}
+
+int bgp_peer_admin_shutdown_rtt_count_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	peer->rtt_keepalive_conf = yang_dnode_get_uint8(args->dnode, NULL);
+	return NB_OK;
+}
+
+int bgp_peer_admin_shutdown_rtt_count_destroy(
+	struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer->rtt_keepalive_conf = 1;
+	return NB_OK;
+}
+
+/* ---- ctx: BGP-LS link identifiers ---------------------------------- */
+
+static int bgp_peer_ls_link_id_apply(struct nb_cb_modify_args *args,
+				     uint64_t flag, bool local)
+{
+	struct peer *peer;
+	struct bgp *bgp;
+	uint32_t val, *field;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+
+	val = yang_dnode_get_uint32(args->dnode, NULL);
+	field = local ? &peer->ls_local_link_id : &peer->ls_remote_link_id;
+	bgp = peer->bgp;
+	if (CHECK_FLAG(peer->flags, flag) && *field == val)
+		return NB_OK;
+
+	/* withdraw the old link NLRI before changing the key */
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
+		bgp_ls_withdraw_bgp_link(bgp, peer);
+
+	*field = val;
+	SET_FLAG(peer->flags, flag);
+
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
+		bgp_ls_originate_bgp_link(bgp, peer);
+	return NB_OK;
+}
+
+int bgp_peer_local_link_id_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_ls_link_id_apply(args, PEER_FLAG_LS_LOCAL_LINK_ID,
+					 true);
+}
+
+int bgp_peer_remote_link_id_modify(struct nb_cb_modify_args *args)
+{
+	return bgp_peer_ls_link_id_apply(args, PEER_FLAG_LS_REMOTE_LINK_ID,
+					 false);
+}
+
+/* ---- ctx: local-interface / local-port (numbered) ------------------ */
+
+int bgp_peer_local_interface_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+	peer_interface_set(peer, yang_dnode_get_string(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bgp_peer_local_interface_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_OK;
+	peer_interface_unset(peer);
+	return NB_OK;
+}
+
+int bgp_peer_local_port_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+	peer_port_set(peer, yang_dnode_get_uint16(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bgp_peer_local_port_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_OK;
+	peer_port_unset(peer);
+	return NB_OK;
+}
+
+/* ---- ctx: v6only (unnumbered, link-local only) --------------------- */
+
+BGP_PEER_CTX_FLAG_MOD_CB(v6only, PEER_FLAG_IFPEER_V6ONLY, "..")
+
+/* ---- ctx: neighbor-remote-as (unnumbered / peer-group) ------------- */
+
+int bgp_peer_remote_as_type_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	enum peer_asn_type new_type;
+	as_t as = 0;
+	const char *as_str = NULL;
+	char as_buf[16];
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+
+	new_type = bgp_nb_yang_as_type(yang_dnode_get_string(args->dnode, NULL));
+	if (new_type == AS_SPECIFIED &&
+	    yang_dnode_exists(args->dnode, "../remote-as")) {
+		as = (as_t)yang_dnode_get_uint32(args->dnode, "../remote-as");
+		snprintfrr(as_buf, sizeof(as_buf), "%u", as);
+		as_str = as_buf;
+	}
+
+	peer_as_change(peer, as, new_type, as_str);
+	return NB_OK;
+}
+
+int bgp_peer_remote_as_modify(struct nb_cb_modify_args *args)
+{
+	struct peer *peer;
+	as_t as;
+	char as_buf[16];
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+
+	as = (as_t)yang_dnode_get_uint32(args->dnode, NULL);
+	snprintfrr(as_buf, sizeof(as_buf), "%u", as);
+	peer_as_change(peer, as, AS_SPECIFIED, as_buf);
+	return NB_OK;
+}
+
+int bgp_peer_remote_as_destroy(struct nb_cb_destroy_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+	case NB_EV_APPLY:
+		break;
+	}
+	/*
+	 * The remote-as leaf is gated by a when-clause; the type-modify
+	 * callback owns the side effect (same rationale as the numbered
+	 * callback).
+	 */
+	return NB_OK;
+}
+
+/* ---- ctx: peer-group attach leaf ----------------------------------- */
+
+/*
+ * modify: bind the peer to the referenced group (peer_group_bind
+ * handles group-member propagation). destroy: legacy semantics of
+ * "no neighbor <p> peer-group <g>" delete the peer entirely — the
+ * datastore mirrors the CLI behavior (registered nuance, fatia 2).
+ */
+int bgp_peer_peer_group_modify(struct nb_cb_modify_args *args)
+{
+	struct bgp *bgp;
+	struct peer *peer;
+	struct peer_group *group;
+	union sockunion su;
+	as_t as = 0;
+	int ret;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_ERR;
+	bgp = peer->bgp;
+
+	group = peer_group_lookup(
+		bgp, yang_dnode_get_string(args->dnode, NULL));
+	if (!group) {
+		snprintfrr(args->errmsg, args->errmsg_len,
+			   "configure the peer-group first");
+		return NB_ERR_VALIDATION;
+	}
+
+	if (yang_dnode_exists(args->dnode, "../remote-address")) {
+		str2sockunion(
+			yang_dnode_get_string(args->dnode, "../remote-address"),
+			&su);
+		ret = peer_group_bind(bgp, &su, peer, group, &as);
+	} else {
+		ret = peer_group_bind(bgp, NULL, peer, group, &as);
+	}
+	return bgp_nb_setter_result(ret, args->errmsg, args->errmsg_len);
+}
+
+int bgp_peer_peer_group_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_OK;
+
+	if (CHECK_FLAG(peer->flags, PEER_FLAG_CAPABILITY_ENHE))
+		bgp_zebra_terminate_radv(peer->bgp, peer);
+
+	peer_notify_unconfig(peer->connection);
+	return bgp_nb_setter_result(peer_delete(peer), args->errmsg,
+				    args->errmsg_len);
+}
+
+/* ---- ctx: path-attribute discard / treat-as-withdraw ---------------- */
+
+static int bgp_nb_path_attr_apply(const struct lyd_node *dnode, bool *table,
+				  bool set)
+{
+	struct peer *peer;
+	afi_t afi;
+	safi_t safi;
+	uint8_t attr_type;
+
+	peer = bgp_nb_peer_from_ctx(dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+
+	attr_type = (uint8_t)yang_dnode_get_uint8(dnode, ".");
+	table[attr_type] = set;
+
+	/*
+	 * Mirror the CLI soft clear: an inbound route refresh keeps the
+	 * routing table in sync with the new treatment.
+	 */
+	FOREACH_AFI_SAFI (afi, safi)
+		peer_clear_soft(peer, afi, safi, BGP_CLEAR_SOFT_IN);
+	return NB_OK;
+}
+
+int bgp_peer_path_attribute_discard_create(struct nb_cb_create_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	return bgp_nb_path_attr_apply(args->dnode, peer->discard_attrs, true);
+}
+
+int bgp_peer_path_attribute_discard_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	return bgp_nb_path_attr_apply(args->dnode, peer->discard_attrs,
+				      false);
+}
+
+int bgp_peer_path_attribute_treat_as_withdraw_create(
+	struct nb_cb_create_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_ERR;
+	return bgp_nb_path_attr_apply(args->dnode, peer->withdraw_attrs,
+				      true);
+}
+
+int bgp_peer_path_attribute_treat_as_withdraw_destroy(
+	struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	return bgp_nb_path_attr_apply(args->dnode, peer->withdraw_attrs,
+				      false);
+}
+
+/* ---- s062: destroy variants for leaves with no yang default --------- */
+
+int bgp_peer_capability_software_version_destroy(
+	struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_flag_unset(peer, PEER_FLAG_CAPABILITY_SOFT_VERSION_OLD);
+	peer_flag_unset(peer, PEER_FLAG_CAPABILITY_SOFT_VERSION_NEW);
+	return NB_OK;
+}
+
+int bgp_peer_bfd_check_cp_failure_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_bfd_leaf_destroy(args);
+}
+
+int bgp_peer_bfd_desired_min_tx_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_bfd_leaf_destroy(args);
+}
+
+int bgp_peer_bfd_detect_multiplier_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_bfd_leaf_destroy(args);
+}
+
+int bgp_peer_bfd_required_min_rx_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_bfd_leaf_destroy(args);
+}
+
+int bgp_peer_ebgp_multihop_enabled_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	return bgp_nb_setter_result(peer_ebgp_multihop_unset(peer, true),
+				    args->errmsg, args->errmsg_len);
+}
+
+int bgp_peer_ebgp_multihop_ttl_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	return bgp_nb_setter_result(peer_ebgp_multihop_unset(peer, true),
+				    args->errmsg, args->errmsg_len);
+}
+
+static int bgp_peer_ls_link_id_destroy(struct nb_cb_destroy_args *args,
+				       uint64_t flag, bool local)
+{
+	struct peer *peer;
+	struct bgp *bgp;
+	uint32_t *field;
+
+	peer = bgp_nb_peer_from_ctx(args->dnode, "..");
+	if (!peer)
+		return NB_OK;
+
+	field = local ? &peer->ls_local_link_id : &peer->ls_remote_link_id;
+	bgp = peer->bgp;
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
+		bgp_ls_withdraw_bgp_link(bgp, peer);
+
+	*field = 0;
+	UNSET_FLAG(peer->flags, flag);
+
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
+		bgp_ls_originate_bgp_link(bgp, peer);
+	return NB_OK;
+}
+
+int bgp_peer_local_link_id_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_ls_link_id_destroy(args, PEER_FLAG_LS_LOCAL_LINK_ID,
+					   true);
+}
+
+int bgp_peer_remote_link_id_destroy(struct nb_cb_destroy_args *args)
+{
+	return bgp_peer_ls_link_id_destroy(args, PEER_FLAG_LS_REMOTE_LINK_ID,
+					   false);
+}
+
+int bgp_peer_admin_shutdown_enable_destroy(struct nb_cb_destroy_args *args)
+{
+	struct peer *peer;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+	peer = bgp_nb_peer_from_ctx(args->dnode, "../..");
+	if (!peer)
+		return NB_OK;
+	peer_tx_shutdown_message_unset(peer);
+	return bgp_nb_setter_result(peer_flag_unset(peer, PEER_FLAG_SHUTDOWN),
+				    args->errmsg, args->errmsg_len);
+}
+
+/* ---- s062 cli_show emitters for the new af-tail families ---------- */
+
+void bgp_neighbor_af_weight_cli_show(struct vty *vty,
+				     const struct lyd_node *dnode,
+				     bool show_defaults)
+{
+	const char *peer = bgp_nb_af_peer_name(dnode);
+
+	vty_out(vty, "  neighbor %s weight %u\n", peer,
+		yang_dnode_get_uint16(dnode, NULL));
+}
+
+void bgp_neighbor_af_default_originate_cli_show(struct vty *vty,
+						const struct lyd_node *dnode,
+						bool show_defaults)
+{
+	const char *peer = bgp_nb_af_peer_name(dnode);
+
+	vty_out(vty, "  neighbor %s default-originate", peer);
+	if (yang_dnode_exists(dnode, "../route-map"))
+		vty_out(vty, " route-map %s",
+			yang_dnode_get_string(dnode, "../route-map"));
+	vty_out(vty, "\n");
+}
+
+void bgp_neighbor_af_dampening_cli_show(struct vty *vty,
+					const struct lyd_node *dnode,
+					bool show_defaults)
+{
+	const char *peer = bgp_nb_af_peer_name(dnode);
+	uint32_t half, reuse, suppress, max;
+
+	if (!yang_dnode_get_bool(dnode, NULL))
+		return;
+	half = yang_dnode_exists(dnode, "../reach-decay")
+		       ? yang_dnode_get_uint8(dnode, "../reach-decay")
+		       : DEFAULT_HALF_LIFE;
+	reuse = yang_dnode_exists(dnode, "../reuse-above")
+			? yang_dnode_get_uint16(dnode, "../reuse-above")
+			: DEFAULT_REUSE;
+	suppress = yang_dnode_exists(dnode, "../suppress-above")
+			   ? yang_dnode_get_uint16(dnode, "../suppress-above")
+			   : DEFAULT_SUPPRESS;
+	max = yang_dnode_exists(dnode, "../unreach-decay")
+		      ? yang_dnode_get_uint8(dnode, "../unreach-decay")
+		      : 60;
+	vty_out(vty, "  neighbor %s dampening %u %u %u %u\n", peer, half,
+		reuse, suppress, max);
+}
+
+static void bgp_nb_orf_cli_show(struct vty *vty,
+				const struct lyd_node *dnode,
+				const char *keyword)
+{
+	const char *peer = bgp_nb_af_peer_name(dnode);
+
+	if (yang_dnode_get_bool(dnode, NULL))
+		vty_out(vty, "  neighbor %s capability orf prefix-list %s\n",
+			peer, keyword);
+}
+
+void bgp_neighbor_af_orf_send_cli_show(struct vty *vty,
+				       const struct lyd_node *dnode,
+				       bool show_defaults)
+{
+	bgp_nb_orf_cli_show(vty, dnode, "send");
+}
+
+void bgp_neighbor_af_orf_receive_cli_show(struct vty *vty,
+					  const struct lyd_node *dnode,
+					  bool show_defaults)
+{
+	bgp_nb_orf_cli_show(vty, dnode, "receive");
+}
+
+void bgp_neighbor_af_orf_both_cli_show(struct vty *vty,
+				       const struct lyd_node *dnode,
+				       bool show_defaults)
+{
+	bgp_nb_orf_cli_show(vty, dnode, "both");
+}
+
+/* ---- completes the send-community cli_show set (fatia 2) ----------- */
+
+BGP_NEIGHBOR_AF_BOOL_CLI_SHOW(send_ext_community_rpki,
+			      "send-community extended rpki")
+
+/*
+ * bfd-options/session-type: model-completeness knob. The fork model
+ * carries the enum but bgpd/bfdd have no consumer and no CLI verb; the
+ * value is accepted into the datastore and the runtime semantics are
+ * deferred (registered for the upstream round). A reject-strict stub
+ * here would poison every sibling commit: the yang default
+ * ("not-configured") makes the framework create the leaf whenever the
+ * container is touched.
+ */
+int bgp_peer_bfd_session_type_modify(struct nb_cb_modify_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+	case NB_EV_APPLY:
+		return NB_OK;
+	}
 	return NB_OK;
 }
