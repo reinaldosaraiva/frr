@@ -44,3 +44,6 @@ extern int bgp_flowspec_display_match_per_ip(afi_t afi, struct bgp_table *rib,
 					     json_object *json_paths);
 
 #endif /* _FRR_BGP_FLOWSPEC_H */
+
+/* S063: exported for northbound wiring. */
+int bgp_fs_local_install_interface(struct bgp *bgp, const char *no, const char *ifname, afi_t afi);

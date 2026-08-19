@@ -158,6 +158,21 @@ DEFINE_HOOK(bgp_snmp_traps_config_write, (struct vty * vty), (vty));
 DEFINE_HOOK(bgp_route_distinguisher_update, (struct bgp *bgp, afi_t afi, bool preconfig),
 	    (bgp, afi, preconfig));
 
+/*
+ * Hook invokers for translation units outside bgp_vty.o (e.g. the
+ * northbound callbacks in bgp_nb_*.c) so they do not link against
+ * the hook_call_* symbols defined here.
+ */
+void bgp_vty_hook_rd_update(struct bgp *bgp, afi_t afi, bool preconfig)
+{
+	hook_call(bgp_route_distinguisher_update, bgp, afi, preconfig);
+}
+
+void bgp_vty_hook_snmp_init_stats(struct bgp *bgp)
+{
+	hook_call(bgp_snmp_init_stats, bgp);
+}
+
 static struct peer_group *listen_range_exists(struct bgp *bgp,
 					      struct prefix *range, int exact);
 

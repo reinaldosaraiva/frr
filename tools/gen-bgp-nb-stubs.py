@@ -54,17 +54,16 @@ import sys
 # so the policy is reviewable in the git history of this file.
 REJECT_POLICY = [
     # (xpath substring, triaged by, rationale)
+    # R1: SRv6 + sem-consumidor (S063 fatia 3)
+    ('sid-export/', 'S063', 'SRv6 SID export - sem consumidor no padrao MGC Router'),
+    ('sid-vpn-export/', 'S063', 'SRv6 SID VPN export - sem consumidor no padrao MGC Router'),
+    ('segment-routing/srv6', 'S063', 'SRv6 global - sem consumidor no padrao MGC Router'),
+    ('sid-vpn-per-vrf-export/', 'S063', 'SRv6 per-VRF SID export - sem consumidor no padrao MGC Router'),
+    ('snmp-traps/', 'S063', 'SNMP module so existe em build --enable-snmp; binario MGC sem consumidor'),
+    ('hard-administrative-reset', 'S063', 'zero codigo em bgpd (grep vazio) - yang-only'),
+    ('instance-type-view', 'S063', 'bgp_nb_config.c:109-114: caminho view nao suportado; wiring mentiria'),
 ]
 REJECT_PATTERNS = [pat for pat, _slice, _why in REJECT_POLICY]
-
-WARN_OP_TO_CB = {
-    "create": "bgp_nb_stub_create",
-    "modify": "bgp_nb_stub_modify",
-    "destroy": "bgp_nb_stub_destroy",
-    "get_next": "bgp_nb_stub_get_next",
-    "get_keys": "bgp_nb_stub_get_keys",
-    "lookup_entry": "bgp_nb_stub_lookup_entry",
-}
 
 # Config ops overridden for the core class; oper ops fall back to the
 # neutral stubs above.
@@ -73,6 +72,15 @@ CORE_OP_TO_CB = {
     "modify": "bgp_nb_stub_reject_modify",
     "destroy": "bgp_nb_stub_reject_destroy",
 }
+
+# Neutral oper stubs: get/iter callbacks stay no-ops for every class.
+NEUTRAL_OP_TO_CB = {
+    "get_next": "bgp_nb_stub_get_next",
+    "get_keys": "bgp_nb_stub_get_keys",
+    "lookup_entry": "bgp_nb_stub_lookup_entry",
+}
+
+ALL_OPS = set(CORE_OP_TO_CB) | set(NEUTRAL_OP_TO_CB)
 
 # MGC core subtrees (schema-xpath substrings). Verified against the
 # current tree: "evpn" only matches l2vpn-evpn nodes, and no stubbed
@@ -87,7 +95,8 @@ def classify(xpath: str) -> str:
         return "core"
     if any(pat in xpath for pat in REJECT_PATTERNS):
         return "reject"
-    return "warn"
+    # warn path removed in S063: untriaged yang fails closed
+    return "reject"
 
 
 def main(tsv_path: str, out_path: str) -> int:
@@ -101,7 +110,7 @@ def main(tsv_path: str, out_path: str) -> int:
                                                 "lookup_entry\t")):
                 continue
             op, xpath = line.split("\t", 1)
-            if op in WARN_OP_TO_CB:
+            if op in ALL_OPS:
                 by_xpath[xpath].add(op)
 
     if not by_xpath:
@@ -143,10 +152,10 @@ def main(tsv_path: str, out_path: str) -> int:
         klass = classify(xpath)
         cb_lines = []
         for op in sorted(ops):
-            if klass in ("core", "reject") and op in CORE_OP_TO_CB:
+            if op in CORE_OP_TO_CB:
                 cb = CORE_OP_TO_CB[op]
             else:
-                cb = WARN_OP_TO_CB[op]
+                cb = NEUTRAL_OP_TO_CB[op]
             cb_lines.append(f".{op} = {cb},")
         cb_block = " ".join(cb_lines)
         lines.append(f'{{ .xpath = "{xpath}",')

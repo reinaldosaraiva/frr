@@ -520,9 +520,7 @@ int bgp_fs_config_write_pbr(struct vty *vty, struct bgp *bgp,
 	return declare_node ? 1 : 0;
 }
 
-static int bgp_fs_local_install_interface(struct bgp *bgp,
-					  const char *no, const char *ifname,
-					  afi_t afi)
+int bgp_fs_local_install_interface(struct bgp *bgp, const char *no, const char *ifname, afi_t afi)
 {
 	struct bgp_pbr_interface *pbr_if;
 	struct bgp_pbr_config *bgp_pbr_cfg = bgp->bgp_pbr_cfg;
@@ -551,6 +549,7 @@ static int bgp_fs_local_install_interface(struct bgp *bgp,
 		if (!pbr_if)
 			return CMD_SUCCESS;
 		RB_REMOVE(bgp_pbr_interface_head, head, pbr_if);
+		XFREE(MTYPE_TMP, pbr_if);
 		return CMD_SUCCESS;
 	}
 	if (ifname) {

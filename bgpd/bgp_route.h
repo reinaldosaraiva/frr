@@ -465,6 +465,20 @@ struct bgp_static {
  *  suppress-map   Conditionally filter more specific routes from updates
  *  <cr>
  */
+/* S063 gRPC-100 Fase D: vty-free aggregate internals shared with NB. */
+int bgp_aggregate_apply(struct bgp *bgp, const char *prefix_str, afi_t afi, safi_t safi,
+			const char *rmap, uint8_t summary_only, uint8_t as_set, uint8_t origin,
+			bool match_med, const char *suppress_map, bool upa_enabled, bool upa_drop,
+			uint32_t upa_max_routes, const char *community_s, const char *ecommunity_s,
+			const char *lcommunity_s, const char *aspath_s, char *errmsg,
+			size_t errmsg_len);
+int bgp_aggregate_remove(struct bgp *bgp, const char *prefix_str, afi_t afi, safi_t safi);
+
+int bgp_distance_cfg_apply(struct bgp *bgp, uint8_t distance, const char *ip_str,
+			   const char *access_list_str, afi_t afi, safi_t safi, char *errmsg,
+			   size_t errmsg_len);
+int bgp_distance_cfg_remove(struct bgp *bgp, const char *ip_str, afi_t afi, safi_t safi);
+
 struct bgp_aggregate {
 	/* Summary-only flag. */
 	uint8_t summary_only;

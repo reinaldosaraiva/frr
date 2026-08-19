@@ -72,6 +72,8 @@ bgpd_libbgp_a_SOURCES = \
 	bgpd/bgp_nb.c \
 	bgpd/bgp_nb_config.c \
 	bgpd/bgp_nb_stubs.c \
+	bgpd/bgp_nb_globalaf.c \
+	bgpd/bgp_nb_daemoncfg.c \
 	bgpd/bgp_routemap.c \
 	bgpd/bgp_routemap_nb.c \
 	bgpd/bgp_routemap_nb_config.c \

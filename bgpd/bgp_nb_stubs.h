@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * BGP northbound stubs — S063: warn path removed, reject-only.
+ */
 #ifndef _FRR_BGP_NB_STUBS_H
 #define _FRR_BGP_NB_STUBS_H
 
 #include "lib/northbound.h"
 
-int bgp_nb_stub_create(struct nb_cb_create_args *args);
-int bgp_nb_stub_modify(struct nb_cb_modify_args *args);
-int bgp_nb_stub_destroy(struct nb_cb_destroy_args *args);
 int bgp_nb_stub_reject_create(struct nb_cb_create_args *args);
 int bgp_nb_stub_reject_modify(struct nb_cb_modify_args *args);
 int bgp_nb_stub_reject_destroy(struct nb_cb_destroy_args *args);

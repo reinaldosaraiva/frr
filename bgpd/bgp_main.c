@@ -441,6 +441,9 @@ static const char *const bgpd_config_xpaths[] = {
 	"/frr-filter:lib",
 	"/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp",
 	"/frr-route-map:lib",
+	"/frr-bgp:bgp-daemon",
+	"/frr-interface:lib/interface/frr-bgp:mpls-bgp-forwarding",
+	"/frr-interface:lib/interface/frr-bgp:mpls-l3vpn-multi-domain-switching",
 };
 
 static struct mgmt_be_client_cbs bgpd_be_client_cbs = {

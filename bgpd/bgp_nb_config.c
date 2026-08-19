@@ -46,7 +46,7 @@
  * name expected by bgp_get()/bgp_lookup_by_name(), which is NULL for the
  * default vrf.
  */
-static const char *bgp_nb_vrf_to_name(const char *vrf_key)
+const char *bgp_nb_vrf_to_name(const char *vrf_key)
 {
 	if (!vrf_key || strmatch(vrf_key, VRF_DEFAULT_NAME))
 		return NULL;
@@ -4914,11 +4914,7 @@ int bgp_neighbor_capabilities_negotiate_destroy(struct nb_cb_destroy_args *args)
  * afi-safi list entry: 1 for a node directly in the entry, 2 for
  * <afi-container>/<leaf>, 3 for <afi-container>/<group>/<leaf>.
  * The neighbor entry sits 2 more hops up, and depth-to-CPP = 5 + ups.
- *
- * AFI/SAFI extracted from the afi-safi-name key.
  */
-static int bgp_nb_af_id_to_afi_safi(const char *afi_safi_id, afi_t *afi_out,
-				    safi_t *safi_out);
 
 static struct peer *bgp_nb_peer_ctx_lookup(const struct lyd_node *af_entry);
 
@@ -4991,8 +4987,7 @@ const char *bgp_nb_af_yang_name(afi_t afi, safi_t safi)
 	return NULL;
 }
 
-static int bgp_nb_af_id_to_afi_safi(const char *afi_safi_id, afi_t *afi_out,
-				    safi_t *safi_out)
+int bgp_nb_af_id_to_afi_safi(const char *afi_safi_id, afi_t *afi_out, safi_t *safi_out)
 {
 	if (strstr(afi_safi_id, "l3vpn-ipv4-unicast")) {
 		*afi_out = AFI_IP;  *safi_out = SAFI_MPLS_VPN;

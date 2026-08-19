@@ -11580,47 +11580,17 @@ static int bgp_aggregate_unset(struct vty *vty, const char *prefix_str,
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	int ret;
-	struct prefix p;
-	struct bgp_dest *dest;
-	struct bgp_aggregate *aggregate;
 
-	/* Convert string to prefix structure. */
-	ret = str2prefix(prefix_str, &p);
-	if (!ret) {
+	ret = bgp_aggregate_remove(bgp, prefix_str, afi, safi);
+	if (ret == -1) {
 		vty_out(vty, "Malformed prefix\n");
 		return CMD_WARNING_CONFIG_FAILED;
 	}
-	apply_mask(&p);
-
-	/* Old configuration check. */
-	dest = bgp_node_lookup(bgp->aggregate[afi][safi], &p);
-	if (!dest) {
+	if (ret == -2) {
 		vty_out(vty,
 			"%% There is no aggregate-address configuration.\n");
 		return CMD_WARNING_CONFIG_FAILED;
 	}
-
-	aggregate = bgp_dest_get_bgp_aggregate_info(dest);
-	bgp_aggregate_delete(bgp, &p, afi, safi, aggregate);
-
-	/*
-	 * Ensure count is 0 to force bgp_aggregate_install() to uninstall.
-	 * bgp_aggregate_delete() should have already decremented the count,
-	 * but we set it explicitly to be certain.
-	 */
-	aggregate->count = 0;
-
-	bgp_aggregate_install(bgp, afi, safi, &p, 0, NULL, NULL,
-			      NULL, NULL,  0, aggregate);
-
-	/* Unlock aggregate address configuration. */
-	bgp_dest_set_bgp_aggregate_info(dest, NULL);
-
-	bgp_free_aggregate_info(aggregate);
-	dest = bgp_dest_unlock_node(dest);
-	assert(dest);
-	bgp_dest_unlock_node(dest);
-
 	return CMD_SUCCESS;
 }
 
@@ -11648,59 +11618,100 @@ static bool bgp_aggregate_cmp_params(struct bgp_aggregate *aggregate, const char
 	return true;
 }
 
-static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi, safi_t safi,
-			     const char *rmap, uint8_t summary_only, uint8_t as_set,
-			     uint8_t origin, bool match_med, const char *suppress_map,
-			     bool upa_enabled, bool upa_drop, uint32_t upa_max_routes)
+/*
+ * S063 (gRPC-100 Fase D): vty-free aggregate apply/remove so the
+ * northbound callbacks share the exact CLI code path. Return codes:
+ * 0 ok, -1 malformed prefix, -2 host-prefix rejected, -3 suppress-map
+ * x summary-only conflict, -4 attr string parse failure (errmsg set),
+ * -5 install failure. The CLI wrappers below translate these to the
+ * legacy vty_out strings.
+ */
+int bgp_aggregate_apply(struct bgp *bgp, const char *prefix_str, afi_t afi, safi_t safi,
+			const char *rmap, uint8_t summary_only, uint8_t as_set, uint8_t origin,
+			bool match_med, const char *suppress_map, bool upa_enabled, bool upa_drop,
+			uint32_t upa_max_routes, const char *community_s, const char *ecommunity_s,
+			const char *lcommunity_s, const char *aspath_s, char *errmsg,
+			size_t errmsg_len)
 {
-	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	int ret;
 	struct prefix p;
 	struct bgp_dest *dest;
 	struct bgp_aggregate *aggregate;
 	bool old_upa_enabled = false;
+	struct community *community = NULL;
+	struct ecommunity *ecommunity = NULL;
+	struct lcommunity *lcommunity = NULL;
+	struct aspath *aspath = NULL;
 
 	if (suppress_map && summary_only) {
-		vty_out(vty,
-			"'summary-only' and 'suppress-map' can't be used at the same time\n");
-		return CMD_WARNING_CONFIG_FAILED;
+		snprintfrr(errmsg, errmsg_len,
+			   "'summary-only' and 'suppress-map' can't be used at the same time");
+		return -3;
 	}
 
-	/* Convert string to prefix structure. */
 	ret = str2prefix(prefix_str, &p);
 	if (!ret) {
-		vty_out(vty, "Malformed prefix\n");
-		return CMD_WARNING_CONFIG_FAILED;
+		snprintfrr(errmsg, errmsg_len, "malformed prefix '%s'", prefix_str);
+		return -1;
 	}
 	apply_mask(&p);
 
 	if ((afi == AFI_IP && p.prefixlen == IPV4_MAX_BITLEN) ||
 	    (afi == AFI_IP6 && p.prefixlen == IPV6_MAX_BITLEN)) {
-		vty_out(vty, "Specified prefix: %s will not result in any useful aggregation, disallowing\n",
-			prefix_str);
-		return CMD_WARNING_CONFIG_FAILED;
+		snprintfrr(errmsg, errmsg_len,
+			   "prefix %s will not result in any useful aggregation", prefix_str);
+		return -2;
 	}
 
-	/* Old configuration check. */
+	community = (community_s && community_s[0]) ? community_str2com(community_s) : NULL;
+	if (community_s && community_s[0] && !community) {
+		snprintfrr(errmsg, errmsg_len, "malformed community '%s'", community_s);
+		return -4;
+	}
+	ecommunity = (ecommunity_s && ecommunity_s[0])
+			     ? ecommunity_str2com(ecommunity_s, ECOMMUNITY_ROUTE_TARGET, 0)
+			     : NULL;
+	if (ecommunity_s && ecommunity_s[0] && !ecommunity) {
+		snprintfrr(errmsg, errmsg_len, "malformed extended-community '%s'", ecommunity_s);
+		community_free(&community);
+		return -4;
+	}
+	lcommunity = (lcommunity_s && lcommunity_s[0]) ? lcommunity_str2com(lcommunity_s) : NULL;
+	if (lcommunity_s && lcommunity_s[0] && !lcommunity) {
+		snprintfrr(errmsg, errmsg_len, "malformed large-community '%s'", lcommunity_s);
+		community_free(&community);
+		ecommunity_free(&ecommunity);
+		return -4;
+	}
+	aspath = (aspath_s && aspath_s[0]) ? aspath_str2aspath(aspath_s, bgp->asnotation) : NULL;
+	if (aspath_s && aspath_s[0] && !aspath) {
+		snprintfrr(errmsg, errmsg_len, "malformed as-path '%s'", aspath_s);
+		community_free(&community);
+		ecommunity_free(&ecommunity);
+		lcommunity_free(&lcommunity);
+		return -4;
+	}
+
 	dest = bgp_node_get(bgp->aggregate[afi][safi], &p);
 	aggregate = bgp_dest_get_bgp_aggregate_info(dest);
 
 	if (aggregate) {
 		old_upa_enabled = aggregate->upa_enabled;
 
-		/* Check for duplicate configs */
 		if (bgp_aggregate_cmp_params(aggregate, rmap, summary_only, as_set, origin,
 					     match_med, suppress_map, upa_enabled, upa_drop,
-					     upa_max_routes))
-			return CMD_SUCCESS;
-
-		vty_out(vty, "There is already same aggregate network.\n");
-		/* try to remove the old entry */
-		ret = bgp_aggregate_unset(vty, prefix_str, afi, safi);
-		if (ret) {
-			vty_out(vty, "Error deleting aggregate.\n");
+					     upa_max_routes) &&
+		    !community_s && !ecommunity_s && !lcommunity_s && !aspath_s) {
 			bgp_dest_unlock_node(dest);
-			return CMD_WARNING_CONFIG_FAILED;
+			return 0;
+		}
+
+		/* try to remove the old entry */
+		ret = bgp_aggregate_remove(bgp, prefix_str, afi, safi);
+		if (ret) {
+			snprintfrr(errmsg, errmsg_len, "error deleting aggregate (ret %d)", ret);
+			bgp_dest_unlock_node(dest);
+			return -5;
 		}
 	}
 
@@ -11709,38 +11720,16 @@ static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi,
 	aggregate->summary_only = summary_only;
 	aggregate->match_med = match_med;
 
-	/* Network operators MUST NOT locally generate any new
-	 * announcements containing AS_SET or AS_CONFED_SET. If they have
-	 * announced routes with AS_SET or AS_CONFED_SET in them, then they
-	 * SHOULD withdraw those routes and re-announce routes for the
-	 * aggregate or component prefixes (i.e., the more-specific routes
-	 * subsumed by the previously aggregated route) without AS_SET
-	 * or AS_CONFED_SET in the updates.
-	 */
-	if (bgp->reject_as_sets) {
-		if (as_set == AGGREGATE_AS_SET) {
-			zlog_warn(
-				"%s: Ignoring as-set because `bgp reject-as-sets` is enabled.",
-				__func__);
-			vty_out(vty,
-				"Ignoring as-set because `bgp reject-as-sets` is enabled.\n");
-		}
-	}
+	if (bgp->reject_as_sets && as_set == AGGREGATE_AS_SET)
+		zlog_warn("%s: Ignoring as-set because `bgp reject-as-sets` is enabled.", __func__);
 
 	aggregate->as_set = as_set;
-
-	/* Override ORIGIN attribute if defined.
-	 * E.g.: Cisco and Juniper set ORIGIN for aggregated address
-	 * to IGP which is not what rfc4271 says.
-	 * This enables the same behavior, optionally.
-	 */
 	aggregate->origin = origin;
 
 	if (rmap) {
 		XFREE(MTYPE_ROUTE_MAP_NAME, aggregate->rmap.name);
 		route_map_counter_decrement(aggregate->rmap.map);
-		aggregate->rmap.name =
-			XSTRDUP(MTYPE_ROUTE_MAP_NAME, rmap);
+		aggregate->rmap.name = XSTRDUP(MTYPE_ROUTE_MAP_NAME, rmap);
 		aggregate->rmap.map = route_map_lookup_by_name(rmap);
 		route_map_counter_increment(aggregate->rmap.map);
 	}
@@ -11748,7 +11737,6 @@ static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi,
 	if (suppress_map) {
 		XFREE(MTYPE_ROUTE_MAP_NAME, aggregate->suppress_map_name);
 		route_map_counter_decrement(aggregate->suppress_map);
-
 		aggregate->suppress_map_name =
 			XSTRDUP(MTYPE_ROUTE_MAP_NAME, suppress_map);
 		aggregate->suppress_map =
@@ -11756,7 +11744,15 @@ static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi,
 		route_map_counter_increment(aggregate->suppress_map);
 	}
 
-	/* UPA (Unreachable Prefix Announcement) configuration */
+	/* Attached attributes (yang-only knobs; consumed by
+	 * bgp_attr_aggregate_intern when the aggregate renders).
+	 */
+	aggregate->community = community;
+	aggregate->ecommunity = ecommunity;
+	aggregate->lcommunity = lcommunity;
+	aggregate->aspath = aspath;
+
+	/* UPA configuration */
 	aggregate->upa_enabled = upa_enabled;
 	aggregate->upa_drop = upa_drop;
 	aggregate->upa_max_routes = upa_max_routes;
@@ -11767,31 +11763,93 @@ static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi,
 
 	bgp_dest_set_bgp_aggregate_info(dest, aggregate);
 
-	/* Aggregate address insert into BGP routing table. */
 	if (!bgp_aggregate_route(bgp, &p, afi, safi, aggregate)) {
-		/* Keep table state consistent and avoid stale aggregate pointer. */
 		bgp_dest_set_bgp_aggregate_info(dest, NULL);
 		bgp_aggregate_free(aggregate);
 		bgp_dest_unlock_node(dest);
-		return CMD_WARNING_CONFIG_FAILED;
+		snprintfrr(errmsg, errmsg_len, "aggregate install failure");
+		return -5;
 	}
 
-	/* Handle UPA origination/withdrawal based on configuration change */
 	if (upa_enabled && !old_upa_enabled) {
-		/* UPA was just enabled - originate for existing unreachable prefixes */
 		if (BGP_DEBUG(upa, UPA))
 			zlog_debug("%s: UPA enabled on aggregate %pFX, originating UPA routes",
 				   __func__, &p);
 		bgp_upa_originate_all(bgp, &p, afi, safi, aggregate);
 	} else if (!upa_enabled && old_upa_enabled) {
-		/* UPA was just disabled - withdraw all active UPA routes */
 		if (BGP_DEBUG(upa, UPA))
 			zlog_debug("%s: UPA disabled on aggregate %pFX, withdrawing UPA routes",
 				   __func__, &p);
 		bgp_upa_withdraw_all(bgp, &p, afi, safi);
 	}
 
-	return CMD_SUCCESS;
+	return 0;
+}
+
+int bgp_aggregate_remove(struct bgp *bgp, const char *prefix_str, afi_t afi, safi_t safi)
+{
+	struct prefix p;
+	struct bgp_dest *dest;
+	struct bgp_aggregate *aggregate;
+
+	if (!str2prefix(prefix_str, &p)) {
+		apply_mask(&p);
+		return -1;
+	}
+	apply_mask(&p);
+
+	dest = bgp_node_lookup(bgp->aggregate[afi][safi], &p);
+	if (!dest)
+		return -2;
+
+	aggregate = bgp_dest_get_bgp_aggregate_info(dest);
+	bgp_aggregate_delete(bgp, &p, afi, safi, aggregate);
+	aggregate->count = 0;
+
+	bgp_aggregate_install(bgp, afi, safi, &p, 0, NULL, NULL, NULL, NULL, 0, aggregate);
+
+	bgp_dest_set_bgp_aggregate_info(dest, NULL);
+	bgp_free_aggregate_info(aggregate);
+	dest = bgp_dest_unlock_node(dest);
+	assert(dest);
+	bgp_dest_unlock_node(dest);
+
+	return 0;
+}
+
+/* keeps the long CLI text on a single literal */
+#define AGG_PREFIX_DISALLOW_MSG                                                                   \
+	"Specified prefix: %s will not result in any useful aggregation, disallowing\n"
+
+static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi, safi_t safi,
+			     const char *rmap, uint8_t summary_only, uint8_t as_set,
+			     uint8_t origin, bool match_med, const char *suppress_map,
+			     bool upa_enabled, bool upa_drop, uint32_t upa_max_routes)
+{
+	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	char errmsg[256] = { 0 };
+	int ret;
+
+	ret = bgp_aggregate_apply(bgp, prefix_str, afi, safi, rmap, summary_only, as_set, origin,
+				  match_med, suppress_map, upa_enabled, upa_drop, upa_max_routes,
+				  NULL, NULL, NULL, NULL, errmsg, sizeof(errmsg));
+	switch (ret) {
+	case 0:
+		return CMD_SUCCESS;
+	case -3:
+	case -4:
+		vty_out(vty, "%s\n", errmsg);
+		return CMD_WARNING_CONFIG_FAILED;
+	case -1:
+		vty_out(vty, "Malformed prefix\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	case -2:
+		vty_out(vty, AGG_PREFIX_DISALLOW_MSG, prefix_str);
+		return CMD_WARNING_CONFIG_FAILED;
+	default:
+		vty_out(vty, "Error deleting aggregate.\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
 }
 
 DEFPY_YANG(aggregate_addressv4, aggregate_addressv4_cmd,
@@ -19376,8 +19434,71 @@ static struct bgp_distance *bgp_distance_new(void)
 
 static void bgp_distance_free(struct bgp_distance *bdistance)
 {
+	XFREE(MTYPE_AS_LIST, bdistance->access_list);
 	XFREE(MTYPE_BGP_DISTANCE, bdistance);
 }
+
+/* S063 (gRPC-100 Fase D): vty-free per-prefix distance internals
+ * shared with the northbound callbacks.
+ */
+int bgp_distance_cfg_apply(struct bgp *bgp, uint8_t distance, const char *ip_str,
+			   const char *access_list_str, afi_t afi, safi_t safi, char *errmsg,
+			   size_t errmsg_len)
+{
+	struct prefix p;
+	struct bgp_dest *dest;
+	struct bgp_distance *bdistance;
+
+	if (!str2prefix(ip_str, &p)) {
+		snprintfrr(errmsg, errmsg_len, "malformed prefix '%s'", ip_str);
+		return -1;
+	}
+
+	dest = bgp_node_get(bgp_distance_table[afi][safi], &p);
+	bdistance = bgp_dest_get_bgp_distance_info(dest);
+	if (bdistance)
+		bgp_dest_unlock_node(dest);
+	else {
+		bdistance = bgp_distance_new();
+		bgp_dest_set_bgp_distance_info(dest, bdistance);
+	}
+
+	bdistance->distance = distance;
+
+	XFREE(MTYPE_AS_LIST, bdistance->access_list);
+	if (access_list_str)
+		bdistance->access_list = XSTRDUP(MTYPE_AS_LIST, access_list_str);
+
+	return 0;
+}
+
+int bgp_distance_cfg_remove(struct bgp *bgp, const char *ip_str, afi_t afi, safi_t safi)
+{
+	struct prefix p;
+	struct bgp_dest *dest;
+	struct bgp_distance *bdistance;
+
+	if (!str2prefix(ip_str, &p))
+		return -1;
+
+	dest = bgp_node_lookup(bgp_distance_table[afi][safi], &p);
+	if (!dest)
+		return -1;
+
+	bdistance = bgp_dest_get_bgp_distance_info(dest);
+	if (!bdistance) {
+		bgp_dest_unlock_node(dest);
+		return 0;
+	}
+
+	bgp_dest_set_bgp_distance_info(dest, NULL);
+	bgp_distance_free(bdistance);
+	dest = bgp_dest_unlock_node(dest);
+	assert(dest);
+	bgp_dest_unlock_node(dest);
+	return 0;
+}
+
 
 static int bgp_distance_set(struct vty *vty, const char *distance_str,
 			    const char *ip_str, const char *access_list_str)

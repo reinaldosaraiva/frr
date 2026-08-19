@@ -1781,5 +1781,213 @@ void bgp_neighbor_af_orf_send_cli_show(struct vty *vty,
 void bgp_neighbor_af_weight_cli_show(struct vty *vty,
 	const struct lyd_node *dnode, bool show_defaults);
 
-#endif /* _FRR_BGP_NB_H_ */
 
+/* ================================================================== */
+/* S063: global/afi-safis + resto declarations                         */
+/* ================================================================== */
+
+/* AF identity resolver (shared from bgp_nb_config.c) */
+int bgp_nb_af_id_to_afi_safi(const char *afi_safi_id, afi_t *afi_out, safi_t *safi_out);
+
+/* G11: container lifecycle */
+const char *bgp_nb_vrf_to_name(const char *vrf_key);
+int bgp_gaf_cluster_length_list_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_cluster_length_list_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_default_afi_safi_create(struct nb_cb_create_args *args);
+int bgp_global_default_afi_safi_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_afi_safi_create(struct nb_cb_create_args *args);
+int bgp_gaf_afi_safi_destroy(struct nb_cb_destroy_args *args);
+
+/* G1: aggregate-route */
+int bgp_gaf_aggregate_create(struct nb_cb_create_args *args);
+int bgp_gaf_aggregate_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_as_set_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_as_set_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_summary_only_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_summary_only_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_rmap_policy_export_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_rmap_policy_export_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_origin_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_origin_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_match_med_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_match_med_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_suppress_map_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_suppress_map_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_upa_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_upa_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_upa_drop_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_upa_drop_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_upa_max_routes_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_upa_max_routes_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_community_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_community_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_extended_community_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_extended_community_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_large_community_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_large_community_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_aggregate_as_path_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_aggregate_as_path_destroy(struct nb_cb_destroy_args *args);
+
+/* G2: dampening */
+int bgp_gaf_dampening_enable_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_dampening_enable_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_dampening_params_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_dampening_destroy(struct nb_cb_destroy_args *args);
+
+/* G3: multiple-paths */
+int bgp_gaf_maxpaths_ebgp_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_maxpaths_ebgp_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_maxpaths_ibgp_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_maxpaths_ibgp_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_maxpaths_ibgp_as_set_modify(struct nb_cb_modify_args *args);
+
+/* G4: admin-distance */
+int bgp_gaf_distance_external_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_distance_external_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_distance_internal_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_distance_internal_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_distance_local_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_distance_local_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_distance_route_create(struct nb_cb_create_args *args);
+int bgp_gaf_distance_route_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_distance_route_distance_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_distance_route_access_list_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_distance_route_access_list_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_distance_route_acl_export_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_distance_route_acl_export_destroy(struct nb_cb_destroy_args *args);
+
+/* G5: table-map */
+int bgp_gaf_table_map_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_table_map_destroy(struct nb_cb_destroy_args *args);
+
+/* G6: retain-route-target-all */
+int bgp_gaf_retain_rt_all_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_retain_rt_all_destroy(struct nb_cb_destroy_args *args);
+
+/* G7: flowspec */
+int bgp_gaf_fs_local_install_enable_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_fs_local_install_enable_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_fs_local_install_if_create(struct nb_cb_create_args *args);
+int bgp_gaf_fs_local_install_if_destroy(struct nb_cb_destroy_args *args);
+
+/* G8: vpn-config */
+int bgp_gaf_vpn_rd_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_rd_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_label_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_label_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_label_auto_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_label_auto_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_nexthop_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_nexthop_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_import_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_import_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_export_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_export_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_rmap_import_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_rmap_import_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_rmap_export_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_rmap_export_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_vrf_rmap_import_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_vrf_rmap_import_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_redirect_rt_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_redirect_rt_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_redirect_rt_ipv6_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_redirect_rt_ipv6_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_export_alloc_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_vpn_export_alloc_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_import_rt_list_create(struct nb_cb_create_args *args);
+int bgp_gaf_vpn_import_rt_list_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_export_rt_list_create(struct nb_cb_create_args *args);
+int bgp_gaf_vpn_export_rt_list_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_vpn_import_vrf_list_create(struct nb_cb_create_args *args);
+int bgp_gaf_vpn_import_vrf_list_destroy(struct nb_cb_destroy_args *args);
+
+/* G9: upa */
+int bgp_gaf_upa_max_routes_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_upa_max_routes_destroy(struct nb_cb_destroy_args *args);
+int bgp_gaf_upa_drop_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_upa_originate_all_modify(struct nb_cb_modify_args *args);
+
+/* G10: prefer-global */
+int bgp_gaf_prefer_global_modify(struct nb_cb_modify_args *args);
+int bgp_gaf_prefer_global_destroy(struct nb_cb_destroy_args *args);
+
+/* R2: daemon + global non-AF + interface */
+int bgp_daemon_update_delay_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_update_delay_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_adv_delay_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_adv_delay_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_establish_wait_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_establish_wait_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_rmap_delay_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_rmap_delay_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_tcp_keepalive_idle_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_tcp_keepalive_idle_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_tcp_keepalive_interval_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_tcp_keepalive_interval_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_tcp_keepalive_probes_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_tcp_keepalive_probes_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_gr_enabled_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_enabled_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_gr_disable_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_disable_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_gr_restart_time_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_restart_time_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_gr_stale_time_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_stale_time_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_gr_stale_routes_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_stale_routes_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_gr_ll_stale_time_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_ll_stale_time_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_gr_select_defer_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_select_defer_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_gr_disable_eor_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_notification_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_community_alias_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_notification_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gr_preserve_fw_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gs_enable_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_gs_enable_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_input_queue_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_input_queue_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_output_queue_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_output_queue_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_ipv6_auto_ra_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_no_rib_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_send_extra_data_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_session_dscp_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_session_dscp_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_suppress_fib_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_suppress_fib_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_suppress_fib_delay_modify(struct nb_cb_modify_args *args);
+int bgp_daemon_suppress_fib_delay_destroy(struct nb_cb_destroy_args *args);
+int bgp_daemon_community_alias_create(struct nb_cb_create_args *args);
+int bgp_daemon_community_alias_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_as_notation_modify(struct nb_cb_modify_args *args);
+int bgp_global_as_notation_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_default_afi_safi_modify(struct nb_cb_modify_args *args);
+int bgp_global_rmap_delay_modify(struct nb_cb_modify_args *args);
+int bgp_global_rmap_delay_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_tcp_keepalive_idle_modify(struct nb_cb_modify_args *args);
+int bgp_global_tcp_keepalive_idle_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_tcp_keepalive_interval_modify(struct nb_cb_modify_args *args);
+int bgp_global_tcp_keepalive_interval_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_tcp_keepalive_probes_modify(struct nb_cb_modify_args *args);
+int bgp_global_tcp_keepalive_probes_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_gr_disable_modify(struct nb_cb_modify_args *args);
+int bgp_global_gr_disable_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_gr_disable_eor_modify(struct nb_cb_modify_args *args);
+int bgp_global_local_as_modify(struct nb_cb_modify_args *args);
+int bgp_global_med_admin_enable_modify(struct nb_cb_modify_args *args);
+int bgp_global_med_admin_max_modify(struct nb_cb_modify_args *args);
+int bgp_global_med_admin_max_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_med_onstart_time_modify(struct nb_cb_modify_args *args);
+int bgp_global_med_onstart_time_destroy(struct nb_cb_destroy_args *args);
+int bgp_global_med_onstart_value_modify(struct nb_cb_modify_args *args);
+int bgp_global_med_onstart_value_destroy(struct nb_cb_destroy_args *args);
+int bgp_if_mpls_bgp_forwarding_modify(struct nb_cb_modify_args *args);
+int bgp_if_mpls_bgp_forwarding_destroy(struct nb_cb_destroy_args *args);
+int bgp_if_mpls_l3vpn_multi_domain_modify(struct nb_cb_modify_args *args);
+int bgp_if_mpls_l3vpn_multi_domain_destroy(struct nb_cb_destroy_args *args);
+
+#endif /* _FRR_BGP_NB_H_ */
