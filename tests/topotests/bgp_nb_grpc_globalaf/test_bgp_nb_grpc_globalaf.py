@@ -203,6 +203,23 @@ def test_global_aggregate_route_grpc():
         f"aggregate survived destroy:\n{output}"
     )
 
+    step("direct leaf deletes on a fresh entry (macro destroy paths)")
+    AGG5 = f"{gaf(CPP, 'ipv4-unicast')}/aggregate-route[prefix='10.1.0.0/16']"
+    run_grpc_client(r1, f"commit-set,{AGG5}/as-set=true")
+    run_grpc_client(r1, f"commit-set,{AGG5}/community=100:20")
+    output = _render(r1)
+    assert "aggregate-address 10.1.0.0/16 as-set" in output, (
+        f"fresh entry missing:\n{output}"
+    )
+    run_grpc_client(r1, f"commit-delete,{AGG5}/community")
+    out = run_grpc_client(r1, f"get-config,{AGG5}")
+    assert "100:20" not in out, f"community leaf delete left residue:\n{out}"
+    output = _render(r1)
+    assert "aggregate-address 10.1.0.0/16 as-set" in output, (
+        f"entry must survive a leaf delete:\n{output}"
+    )
+    run_grpc_client(r1, f"commit-delete,{AGG5}")
+
     step("ipv6 fanout")
     AGG6 = (
         f"{gaf(CPP, 'ipv6-unicast')}"
@@ -336,7 +353,7 @@ def test_global_distance_grpc():
         f"distance bgp missing:\n{output}"
     )
 
-    step("per-prefix distance with access-list")
+    step("per-prefix distance with access-list, then distance-only modify")
     run_grpc_client(
         r1,
         [
@@ -348,11 +365,19 @@ def test_global_distance_grpc():
     assert "distance 170 10.5.0.0/16 AL5" in output, (
         f"per-prefix distance missing:\n{output}"
     )
+    run_grpc_client(r1, f"commit-set,{DRT4}[prefix='10.5.0.0/16']/distance=160")
+    output = _render(r1)
+    assert "distance 160 10.5.0.0/16 AL5" in output, (
+        f"distance-only modify must preserve the access-list:\n{output}"
+    )
 
     step("entry destroy")
     run_grpc_client(r1, f"commit-delete,{DRT4}[prefix='10.5.0.0/16']")
     output = _render(r1)
     assert "distance 170 10.5.0.0/16" not in output, (
+        f"distance entry survived destroy:\n{output}"
+    )
+    assert "distance 160 10.5.0.0/16" not in output, (
         f"distance entry survived destroy:\n{output}"
     )
 

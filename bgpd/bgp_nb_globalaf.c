@@ -313,6 +313,7 @@ static int gaf_aggregate_conflict_check(const struct lyd_node *dnode, const char
 		safi_t safi;                                                                      \
 		char dummy[256];                                                                  \
 		switch (args->event) {                                                            \
+		case NB_EV_VALIDATE:                                                              \
 		case NB_EV_PREPARE:                                                               \
 		case NB_EV_ABORT:                                                                 \
 			return NB_OK;                                                             \
@@ -485,26 +486,6 @@ int bgp_gaf_dampening_enable_modify(struct nb_cb_modify_args *args)
 	return NB_OK;
 }
 
-int bgp_gaf_dampening_enable_destroy(struct nb_cb_destroy_args *args)
-{
-	struct bgp *bgp;
-	afi_t afi;
-	safi_t safi;
-
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-		return NB_OK;
-	case NB_EV_APPLY:
-		break;
-	}
-	if (gaf_af_lookup(args->dnode, 3, &bgp, &afi, &safi, NULL, 0) < 0)
-		return NB_ERR;
-	bgp_damp_disable(bgp, afi, safi);
-	return NB_OK;
-}
-
 int bgp_gaf_dampening_params_modify(struct nb_cb_modify_args *args)
 {
 	struct bgp *bgp;
@@ -588,6 +569,7 @@ int bgp_gaf_dampening_destroy(struct nb_cb_destroy_args *args)
 			return NB_ERR;                                                            \
 		bgp_maximum_paths_set(bgp, afi, safi, peer_type,                                  \
 				      yang_dnode_get_uint16(args->dnode, NULL), false);           \
+		bgp_recalculate_all_bestpaths(bgp);                                               \
 		return NB_OK;                                                                     \
 	}                                                                                         \
 	int name##_destroy(struct nb_cb_destroy_args *args)                                       \
@@ -606,6 +588,7 @@ int bgp_gaf_dampening_destroy(struct nb_cb_destroy_args *args)
 		if (gaf_af_lookup(args->dnode, 4, &bgp, &afi, &safi, NULL, 0) < 0)                \
 			return NB_ERR;                                                            \
 		bgp_maximum_paths_set(bgp, afi, safi, peer_type, multipath_num, false);           \
+		bgp_recalculate_all_bestpaths(bgp);                                               \
 		return NB_OK;                                                                     \
 	}
 
@@ -613,21 +596,6 @@ GAF_MAXPATHS_CB(bgp_gaf_maxpaths_ebgp, BGP_PEER_EBGP)
 GAF_MAXPATHS_CB(bgp_gaf_maxpaths_ibgp, BGP_PEER_IBGP)
 
 /* cluster-length-list: interim (registered debt in the caderno). */
-int bgp_gaf_maxpaths_ibgp_as_set_modify(struct nb_cb_modify_args *args)
-{
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-		snprintfrr(args->errmsg, args->errmsg_len,
-			   "equal-cluster-length is not wired (no daemon consumer)");
-		return NB_ERR_VALIDATION;
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		return NB_OK;
-	}
-	return NB_OK;
-}
-
 /* ================================================================== */
 /* G4: admin-distance                                                  */
 /* ================================================================== */
@@ -686,21 +654,6 @@ int bgp_gaf_distance_internal_modify(struct nb_cb_modify_args *args)
 int bgp_gaf_distance_local_modify(struct nb_cb_modify_args *args)
 {
 	return gaf_distance_modify(args);
-}
-
-int bgp_gaf_distance_external_destroy(struct nb_cb_destroy_args *args)
-{
-	return NB_OK;
-}
-
-int bgp_gaf_distance_internal_destroy(struct nb_cb_destroy_args *args)
-{
-	return NB_OK;
-}
-
-int bgp_gaf_distance_local_destroy(struct nb_cb_destroy_args *args)
-{
-	return NB_OK;
 }
 
 /* distance per-prefix: bgp_distance_apply/remove extracted from the
@@ -797,7 +750,11 @@ int bgp_gaf_distance_route_distance_modify(struct nb_cb_modify_args *args)
 	}
 	if (gaf_af_lookup(args->dnode, 3, &bgp, &afi, &safi, args->errmsg, args->errmsg_len) < 0)
 		return NB_ERR;
-	return gaf_distance_route_apply(args, 3, NULL);
+	return gaf_distance_route_apply(args, 3,
+					yang_dnode_exists(args->dnode, "../access-list")
+						? yang_dnode_get_string(args->dnode,
+									"../access-list")
+						: NULL);
 }
 
 int bgp_gaf_distance_route_access_list_modify(struct nb_cb_modify_args *args)
@@ -967,11 +924,6 @@ int bgp_gaf_retain_rt_all_modify(struct nb_cb_modify_args *args)
 	return NB_OK;
 }
 
-int bgp_gaf_retain_rt_all_destroy(struct nb_cb_destroy_args *args)
-{
-	return NB_OK;
-}
-
 /* ================================================================== */
 /* G7: flowspec local-install                                          */
 /* ================================================================== */
@@ -995,11 +947,6 @@ int bgp_gaf_fs_local_install_enable_modify(struct nb_cb_modify_args *args)
 		return NB_ERR;
 	bgp_fs_local_install_interface(bgp, yang_dnode_get_bool(args->dnode, NULL) ? NULL : "no",
 				       NULL, afi);
-	return NB_OK;
-}
-
-int bgp_gaf_fs_local_install_enable_destroy(struct nb_cb_destroy_args *args)
-{
 	return NB_OK;
 }
 
@@ -1098,6 +1045,12 @@ static int gaf_vpn_family_in_candidate(const struct lyd_node *dnode)
 }
 
 /* --- rd (af_rd_vpn_export) --------------------------------------- */
+
+static bool bgp_is_vrf_or_default(const struct bgp *bgp)
+{
+	return bgp->inst_type == BGP_INSTANCE_TYPE_VRF ||
+	       bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT;
+}
 
 int bgp_gaf_vpn_rd_modify(struct nb_cb_modify_args *args)
 {
@@ -1347,31 +1300,6 @@ int bgp_gaf_vpn_export_alloc_modify(struct nb_cb_modify_args *args)
 	return NB_OK;
 }
 
-int bgp_gaf_vpn_export_alloc_destroy(struct nb_cb_destroy_args *args)
-{
-	struct bgp *bgp;
-	afi_t afi;
-	safi_t safi;
-
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-		return NB_OK;
-	case NB_EV_APPLY:
-		break;
-	}
-	if (gaf_af_lookup(args->dnode, 3, &bgp, &afi, &safi, NULL, 0) < 0)
-		return NB_ERR;
-	if (!CHECK_FLAG(bgp->vpn_policy[afi].flags, BGP_VPN_POLICY_TOVPN_LABEL_PER_NEXTHOP))
-		return NB_OK;
-
-	vpn_leak_prechange(BGP_VPN_POLICY_DIR_TOVPN, afi, bgp_get_default(), bgp);
-	UNSET_FLAG(bgp->vpn_policy[afi].flags, BGP_VPN_POLICY_TOVPN_LABEL_PER_NEXTHOP);
-	vpn_leak_postchange(BGP_VPN_POLICY_DIR_TOVPN, afi, bgp_get_default(), bgp);
-	return NB_OK;
-}
-
 /* --- nexthop (af_nexthop_vpn_export) ------------------------------ */
 
 int bgp_gaf_vpn_nexthop_modify(struct nb_cb_modify_args *args)
@@ -1451,8 +1379,7 @@ static int gaf_vpn_imexport(const struct lyd_node *dnode, char *errmsg, size_t e
 		return -1;
 
 	/* mirrors bgp_imexport_vpn: vrf or default instance only */
-	if (bgp->inst_type != BGP_INSTANCE_TYPE_VRF &&
-	    bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT) {
+	if (!bgp_is_vrf_or_default(bgp)) {
 		snprintfrr(errmsg, errmsg_len,
 			   "import/export vpn valid only for bgp vrf or default instance");
 		return -1;
@@ -2134,22 +2061,6 @@ int bgp_gaf_vpn_redirect_rt_ipv6_modify(struct nb_cb_modify_args *args)
 	return NB_OK;
 }
 
-int bgp_gaf_vpn_redirect_rt_ipv6_destroy(struct nb_cb_destroy_args *args)
-{
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-		return NB_OK;
-	case NB_EV_APPLY:
-		break;
-	}
-	/* rebuild with redirect-rt-ipv6 removed (rt6 = false) */
-	if (gaf_vpn_redirect_apply(args->dnode, args->errmsg, args->errmsg_len) < 0)
-		return NB_ERR;
-	return NB_OK;
-}
-
 /* ================================================================== */
 /* G9: upa global (upa_*_global DEFUNs, bgp_vty.c:24449+)              */
 /* ================================================================== */
@@ -2184,27 +2095,6 @@ int bgp_gaf_upa_max_routes_modify(struct nb_cb_modify_args *args)
 	if (gaf_af_lookup(args->dnode, 3, &bgp, &afi, &safi, args->errmsg, args->errmsg_len) < 0)
 		return NB_ERR;
 	bgp->upa_max_routes[afi][safi] = yang_dnode_get_uint32(args->dnode, NULL);
-	return NB_OK;
-}
-
-int bgp_gaf_upa_max_routes_destroy(struct nb_cb_destroy_args *args)
-{
-	struct bgp *bgp;
-	afi_t afi;
-	safi_t safi;
-
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-		return NB_OK;
-	case NB_EV_APPLY:
-		break;
-	}
-	if (gaf_af_lookup(args->dnode, 3, &bgp, &afi, &safi, NULL, 0) < 0)
-		return NB_ERR;
-	/* reset to unlimited */
-	bgp->upa_max_routes[afi][safi] = 0;
 	return NB_OK;
 }
 
@@ -2309,11 +2199,6 @@ int bgp_gaf_prefer_global_modify(struct nb_cb_modify_args *args)
 		bgp->nexthop_prefer_global[afi][safi] = enable;
 		bgp_clear_soft_in(bgp, afi, safi);
 	}
-	return NB_OK;
-}
-
-int bgp_gaf_prefer_global_destroy(struct nb_cb_destroy_args *args)
-{
 	return NB_OK;
 }
 

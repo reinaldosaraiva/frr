@@ -1358,7 +1358,7 @@ int bgp_if_mpls_bgp_forwarding_modify(struct nb_cb_modify_args *args)
 	}
 
 	enable = yang_dnode_get_bool(args->dnode, NULL);
-	if (CHECK_FLAG(iifp->flags, BGP_INTERFACE_MPLS_BGP_FORWARDING) == enable)
+	if (!!CHECK_FLAG(iifp->flags, BGP_INTERFACE_MPLS_BGP_FORWARDING) == enable)
 		return NB_OK;
 
 	COND_FLAG(iifp->flags, BGP_INTERFACE_MPLS_BGP_FORWARDING, enable);
@@ -1393,7 +1393,7 @@ int bgp_if_mpls_l3vpn_multi_domain_modify(struct nb_cb_modify_args *args)
 	}
 
 	enable = yang_dnode_get_bool(args->dnode, NULL);
-	if (CHECK_FLAG(iifp->flags, BGP_INTERFACE_MPLS_L3VPN_SWITCHING) == enable)
+	if (!!CHECK_FLAG(iifp->flags, BGP_INTERFACE_MPLS_L3VPN_SWITCHING) == enable)
 		return NB_OK;
 
 	COND_FLAG(iifp->flags, BGP_INTERFACE_MPLS_L3VPN_SWITCHING, enable);
