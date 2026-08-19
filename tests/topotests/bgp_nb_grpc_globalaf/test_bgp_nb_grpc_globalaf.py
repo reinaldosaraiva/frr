@@ -282,8 +282,16 @@ def test_global_maxpaths_grpc():
         f"ibgp maxpaths + cll:\n{output}"
     )
 
-    step("NEG: over the multipath cap")
-    _commit_rejected(r1, f"commit-set,{MP4}/ebgp/maximum-paths=60000")
+    step("NEG: over the multipath cap (VALIDATE-only; zero residue)")
+    output = _commit_rejected(
+        r1, f"commit-set,{MP4}/ebgp/maximum-paths=60000"
+    )
+    out = run_grpc_client(r1, f"get-config,{MP4}")
+    assert "60000" not in out, f"rejected cap left residue:\n{out}"
+    output2 = _render(r1)
+    assert "maximum-paths 60000" not in output2, (
+        f"rejected cap mutated the daemon:\n{output2}"
+    )
 
     step("labeled-unicast fanout")
     MPL = f"{gaf(CPP, 'ipv4-labeled-unicast')}/use-multiple-paths"
@@ -599,6 +607,18 @@ def test_daemon_config_grpc():
     output = r1.vtysh_cmd("show running-config")
     assert "bgp graceful-restart restart-time 150" in output, (
         f"GR render missing:\n{output}"
+    )
+
+    step("graceful-shutdown enable then disable (no wedge)")
+    run_grpc_client(r1, f"commit-set,{DAEMON}/graceful-shutdown/enable=true")
+    output = r1.vtysh_cmd("show running-config")
+    assert "bgp graceful-shutdown" in output, (
+        f"graceful-shutdown render missing:\n{output}"
+    )
+    run_grpc_client(r1, f"commit-set,{DAEMON}/graceful-shutdown/enable=false")
+    output = r1.vtysh_cmd("show running-config")
+    assert "bgp graceful-shutdown\n" not in output, (
+        f"graceful-shutdown disable wedged:\n{output}"
     )
 
     step("community-alias + malformed NEG")

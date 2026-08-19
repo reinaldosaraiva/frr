@@ -44,8 +44,7 @@
 #define IPTOS_PREC_INTERNETCONTROL 0xc0 /* CS6 */
 #endif
 
-static struct bgp *daemon_lookup_bgp(const struct lyd_node *dnode,
-				     unsigned int depth_to_cpp)
+static struct bgp *daemon_lookup_bgp(const struct lyd_node *dnode, unsigned int depth_to_cpp)
 {
 	char vrf_xpath[64];
 	const char *vrf_key;
@@ -71,22 +70,19 @@ static void daemon_gr_restart_capability_update(struct peer *peer)
 	peer_gr_mode = bgp_peer_gr_mode_get(peer);
 
 	if (!((peer_gr_mode == PEER_GR) ||
-	      (peer_gr_mode == PEER_GLOBAL_INHERIT &&
-	       global_gr_mode == GLOBAL_GR)))
+	      (peer_gr_mode == PEER_GLOBAL_INHERIT && global_gr_mode == GLOBAL_GR)))
 		return;
 
 	if (BGP_IS_VALID_STATE_FOR_NOTIF(peer->connection->status)) {
 		peer_set_last_reset(peer, PEER_DOWN_CAPABILITY_CHANGE);
-		bgp_notify_send(peer->connection, BGP_NOTIFY_CEASE,
-				BGP_NOTIFY_CEASE_CONFIG_CHANGE);
+		bgp_notify_send(peer->connection, BGP_NOTIFY_CEASE, BGP_NOTIFY_CEASE_CONFIG_CHANGE);
 	}
 }
 
 /* Core of the legacy bgp_global_gr_config_vty() minus the vty output:
  * bm flag bookkeeping plus bgp_gr_update_all() on every instance.
  */
-static int daemon_gr_apply(bool on, bool disable, char *errmsg,
-			   size_t errmsg_len)
+static int daemon_gr_apply(bool on, bool disable, char *errmsg, size_t errmsg_len)
 {
 	struct listnode *node, *nnode;
 	struct bgp *bgp;
@@ -118,19 +114,15 @@ static int daemon_gr_apply(bool on, bool disable, char *errmsg,
 	}
 
 	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp)) {
-		ret = bgp_gr_update_all(
-			bgp, disable ? (on ? GLOBAL_DISABLE_CMD
-					   : NO_GLOBAL_DISABLE_CMD)
-				     : (on ? GLOBAL_GR_CMD
-					   : NO_GLOBAL_GR_CMD));
-		VTY_BGP_GR_ROUTER_DETECT_AND_SEND_CAPABILITY_TO_ZEBRA(
-			bgp, bgp->peer, ret);
+		ret = bgp_gr_update_all(bgp,
+					disable ? (on ? GLOBAL_DISABLE_CMD : NO_GLOBAL_DISABLE_CMD)
+						: (on ? GLOBAL_GR_CMD : NO_GLOBAL_GR_CMD));
+		VTY_BGP_GR_ROUTER_DETECT_AND_SEND_CAPABILITY_TO_ZEBRA(bgp, bgp->peer, ret);
 		if (ret != BGP_GR_SUCCESS) {
 			snprintfrr(errmsg, errmsg_len,
 				   "applying global graceful-restart to vrf %s failed",
-				   bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT
-					   ? VRF_DEFAULT_NAME
-					   : bgp->name);
+				   bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT ? VRF_DEFAULT_NAME
+									       : bgp->name);
 			return NB_ERR;
 		}
 	}
@@ -155,10 +147,9 @@ int bgp_daemon_update_delay_modify(struct nb_cb_modify_args *args)
 		 */
 		if (bm->v_update_delay == BGP_UPDATE_DELAY_DEFAULT) {
 			for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp)) {
-				if (bgp->v_update_delay !=
-				    BGP_UPDATE_DELAY_DEFAULT) {
+				if (bgp->v_update_delay != BGP_UPDATE_DELAY_DEFAULT) {
 					snprintfrr(args->errmsg, args->errmsg_len,
-					   "per-vrf update-delay already set");
+						   "per-vrf update-delay already set");
 					return NB_ERR_VALIDATION;
 				}
 			}
@@ -173,13 +164,7 @@ int bgp_daemon_update_delay_modify(struct nb_cb_modify_args *args)
 
 	update_delay = yang_dnode_get_uint16(args->dnode, NULL);
 	if (yang_dnode_exists(args->dnode, "../establish-wait-time")) {
-		establish_wait = yang_dnode_get_uint16(
-			args->dnode, "../establish-wait-time");
-		if (update_delay < establish_wait) {
-			snprintfrr(args->errmsg, args->errmsg_len,
-				   "update-delay less than establish-wait");
-			return NB_ERR;
-		}
+		establish_wait = yang_dnode_get_uint16(args->dnode, "../establish-wait-time");
 	} else {
 		establish_wait = update_delay;
 	}
@@ -327,8 +312,7 @@ int bgp_daemon_rmap_delay_modify(struct nb_cb_modify_args *args)
 
 	if (!delay && event_is_scheduled(bm->t_rmap_update)) {
 		event_cancel(&bm->t_rmap_update);
-		event_execute(bm->master, bgp_route_map_update_timer, NULL, 0,
-			      NULL);
+		event_execute(bm->master, bgp_route_map_update_timer, NULL, 0, NULL);
 	}
 
 	return NB_OK;
@@ -345,8 +329,8 @@ int bgp_daemon_gr_enabled_modify(struct nb_cb_modify_args *args)
 		break;
 	}
 
-	return daemon_gr_apply(yang_dnode_get_bool(args->dnode, NULL), false,
-			       args->errmsg, args->errmsg_len);
+	return daemon_gr_apply(yang_dnode_get_bool(args->dnode, NULL), false, args->errmsg,
+			       args->errmsg_len);
 }
 
 int bgp_daemon_gr_enabled_destroy(struct nb_cb_destroy_args *args)
@@ -374,8 +358,8 @@ int bgp_daemon_gr_disable_modify(struct nb_cb_modify_args *args)
 		break;
 	}
 
-	return daemon_gr_apply(yang_dnode_get_bool(args->dnode, NULL), true,
-			       args->errmsg, args->errmsg_len);
+	return daemon_gr_apply(yang_dnode_get_bool(args->dnode, NULL), true, args->errmsg,
+			       args->errmsg_len);
 }
 
 int bgp_daemon_gr_disable_destroy(struct nb_cb_destroy_args *args)
@@ -421,10 +405,8 @@ int bgp_daemon_gr_restart_time_modify(struct nb_cb_modify_args *args)
 			    !CHECK_FLAG(peer->cap, PEER_CAP_DYNAMIC_ADV))
 				daemon_gr_restart_capability_update(peer);
 			else
-				bgp_capability_send(peer->connection, AFI_IP,
-						    SAFI_UNICAST,
-						    CAPABILITY_CODE_RESTART,
-						    CAPABILITY_ACTION_SET);
+				bgp_capability_send(peer->connection, AFI_IP, SAFI_UNICAST,
+						    CAPABILITY_CODE_RESTART, CAPABILITY_ACTION_SET);
 		}
 	}
 
@@ -529,10 +511,8 @@ int bgp_daemon_gr_ll_stale_time_modify(struct nb_cb_modify_args *args)
 		for (ALL_LIST_ELEMENTS(bgp->peer, pnode, pnnode, peer)) {
 			if (!peer->connection)
 				continue;
-			bgp_capability_send(peer->connection, AFI_IP,
-					    SAFI_UNICAST,
-					    CAPABILITY_CODE_LLGR,
-					    CAPABILITY_ACTION_SET);
+			bgp_capability_send(peer->connection, AFI_IP, SAFI_UNICAST,
+					    CAPABILITY_CODE_LLGR, CAPABILITY_ACTION_SET);
 		}
 	}
 
@@ -559,10 +539,8 @@ int bgp_daemon_gr_ll_stale_time_destroy(struct nb_cb_destroy_args *args)
 		for (ALL_LIST_ELEMENTS(bgp->peer, pnode, pnnode, peer)) {
 			if (!peer->connection)
 				continue;
-			bgp_capability_send(peer->connection, AFI_IP,
-					    SAFI_UNICAST,
-					    CAPABILITY_CODE_LLGR,
-					    CAPABILITY_ACTION_UNSET);
+			bgp_capability_send(peer->connection, AFI_IP, SAFI_UNICAST,
+					    CAPABILITY_CODE_LLGR, CAPABILITY_ACTION_UNSET);
 		}
 	}
 
@@ -651,10 +629,8 @@ int bgp_daemon_gr_notification_modify(struct nb_cb_modify_args *args)
 		for (ALL_LIST_ELEMENTS(bgp->peer, pnode, pnnode, peer)) {
 			if (!peer->connection)
 				continue;
-			bgp_capability_send(peer->connection, AFI_IP,
-					    SAFI_UNICAST,
-					    CAPABILITY_CODE_RESTART,
-					    CAPABILITY_ACTION_SET);
+			bgp_capability_send(peer->connection, AFI_IP, SAFI_UNICAST,
+					    CAPABILITY_CODE_RESTART, CAPABILITY_ACTION_SET);
 		}
 	}
 
@@ -721,7 +697,8 @@ int bgp_daemon_gs_enable_modify(struct nb_cb_modify_args *args)
 
 	switch (args->event) {
 	case NB_EV_VALIDATE:
-		if (CHECK_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN)) {
+		if (yang_dnode_get_bool(args->dnode, NULL) &&
+		    CHECK_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN)) {
 			snprintfrr(args->errmsg, args->errmsg_len,
 				   "global graceful-shutdown already set");
 			return NB_ERR_VALIDATION;
@@ -735,7 +712,7 @@ int bgp_daemon_gs_enable_modify(struct nb_cb_modify_args *args)
 	}
 
 	enable = yang_dnode_get_bool(args->dnode, NULL);
-	if (CHECK_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN) == enable)
+	if ((bool)CHECK_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN) == enable)
 		return NB_OK;
 
 	if (enable)
@@ -743,9 +720,6 @@ int bgp_daemon_gs_enable_modify(struct nb_cb_modify_args *args)
 	else
 		UNSET_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN);
 
-	/* Mirror bgp_initiate_graceful_shut_unshut() with the quiet
-	 * variants used by the per-instance northbound handler.
-	 */
 	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp)) {
 		bgp_static_redo_import_check(bgp);
 		bgp_redistribute_redo(bgp);
@@ -932,11 +906,8 @@ int bgp_daemon_suppress_fib_modify(struct nb_cb_modify_args *args)
 	 * BGP_DEFAULT_SUPPRESS_FIB_ADV_DELAY); read the sibling leaf so a
 	 * delay-only knob set in the same transaction is not clobbered.
 	 */
-	adv_delay = yang_dnode_exists(args->dnode,
-				      "../suppress-fib-pending-delay")
-			    ? yang_dnode_get_uint16(
-				      args->dnode,
-				      "../suppress-fib-pending-delay")
+	adv_delay = yang_dnode_exists(args->dnode, "../suppress-fib-pending-delay")
+			    ? yang_dnode_get_uint16(args->dnode, "../suppress-fib-pending-delay")
 			    : BGP_DEFAULT_SUPPRESS_FIB_ADV_DELAY;
 
 	bm_wait_for_fib_set(yang_dnode_get_bool(args->dnode, NULL), adv_delay);
@@ -971,11 +942,9 @@ int bgp_daemon_suppress_fib_delay_modify(struct nb_cb_modify_args *args)
 		break;
 	}
 
-	bm_wait_for_fib_set(
-		yang_dnode_exists(args->dnode, "../suppress-fib-pending") &&
-			yang_dnode_get_bool(args->dnode,
-					    "../suppress-fib-pending"),
-		yang_dnode_get_uint16(args->dnode, NULL));
+	bm_wait_for_fib_set(yang_dnode_exists(args->dnode, "../suppress-fib-pending") &&
+				    yang_dnode_get_bool(args->dnode, "../suppress-fib-pending"),
+			    yang_dnode_get_uint16(args->dnode, NULL));
 
 	return NB_OK;
 }
@@ -991,11 +960,9 @@ int bgp_daemon_suppress_fib_delay_destroy(struct nb_cb_destroy_args *args)
 		break;
 	}
 
-	bm_wait_for_fib_set(
-		yang_dnode_exists(args->dnode, "../suppress-fib-pending") &&
-			yang_dnode_get_bool(args->dnode,
-					    "../suppress-fib-pending"),
-		BGP_DEFAULT_SUPPRESS_FIB_ADV_DELAY);
+	bm_wait_for_fib_set(yang_dnode_exists(args->dnode, "../suppress-fib-pending") &&
+				    yang_dnode_get_bool(args->dnode, "../suppress-fib-pending"),
+			    BGP_DEFAULT_SUPPRESS_FIB_ADV_DELAY);
 
 	return NB_OK;
 }
@@ -1046,8 +1013,7 @@ int bgp_daemon_community_alias_modify(struct nb_cb_modify_args *args)
 
 	switch (args->event) {
 	case NB_EV_VALIDATE:
-		community = yang_dnode_get_string(args->dnode,
-						  "../community");
+		community = yang_dnode_get_string(args->dnode, "../community");
 		{
 			struct community *com = community_str2com(community);
 
@@ -1076,8 +1042,7 @@ int bgp_daemon_community_alias_modify(struct nb_cb_modify_args *args)
 	lookup_community = bgp_ca_community_lookup(&ca);
 
 	if (lookup_alias) {
-		strlcpy(ca.community, lookup_alias->community,
-			sizeof(ca.community));
+		strlcpy(ca.community, lookup_alias->community, sizeof(ca.community));
 		if (bgp_ca_community_lookup(&ca)) {
 			snprintfrr(args->errmsg, args->errmsg_len,
 				   "community (%s) already has this alias (%s)",
@@ -1089,8 +1054,7 @@ int bgp_daemon_community_alias_modify(struct nb_cb_modify_args *args)
 	}
 
 	if (lookup_community) {
-		strlcpy(ca.alias, lookup_community->alias,
-			sizeof(ca.alias));
+		strlcpy(ca.alias, lookup_community->alias, sizeof(ca.alias));
 		if (bgp_ca_alias_lookup(&ca)) {
 			snprintfrr(args->errmsg, args->errmsg_len,
 				   "alias (%s) already has this community (%s)",
@@ -1215,10 +1179,9 @@ int bgp_global_gr_disable_modify(struct nb_cb_modify_args *args)
 
 	/* Mirror bgp_inst_gr_config_vty(vty, bgp, on, disable=true). */
 	ret = bgp_gr_update_all(bgp, yang_dnode_get_bool(args->dnode, NULL)
-					 ? GLOBAL_DISABLE_CMD
-					 : NO_GLOBAL_DISABLE_CMD);
-	VTY_BGP_GR_ROUTER_DETECT_AND_SEND_CAPABILITY_TO_ZEBRA(bgp, bgp->peer,
-							      ret);
+					     ? GLOBAL_DISABLE_CMD
+					     : NO_GLOBAL_DISABLE_CMD);
+	VTY_BGP_GR_ROUTER_DETECT_AND_SEND_CAPABILITY_TO_ZEBRA(bgp, bgp->peer, ret);
 
 	return NB_OK;
 }
@@ -1242,8 +1205,7 @@ int bgp_global_gr_disable_destroy(struct nb_cb_destroy_args *args)
 		return NB_OK;
 
 	ret = bgp_gr_update_all(bgp, NO_GLOBAL_DISABLE_CMD);
-	VTY_BGP_GR_ROUTER_DETECT_AND_SEND_CAPABILITY_TO_ZEBRA(bgp, bgp->peer,
-							      ret);
+	VTY_BGP_GR_ROUTER_DETECT_AND_SEND_CAPABILITY_TO_ZEBRA(bgp, bgp->peer, ret);
 
 	return NB_OK;
 }
@@ -1265,8 +1227,7 @@ int bgp_global_gr_disable_eor_modify(struct nb_cb_modify_args *args)
 	if (!bgp)
 		return NB_ERR;
 
-	COND_FLAG(bgp->flags, BGP_FLAG_GR_DISABLE_EOR,
-		  yang_dnode_get_bool(args->dnode, NULL));
+	COND_FLAG(bgp->flags, BGP_FLAG_GR_DISABLE_EOR, yang_dnode_get_bool(args->dnode, NULL));
 
 	return NB_OK;
 }
@@ -1282,11 +1243,9 @@ int bgp_global_local_as_modify(struct nb_cb_modify_args *args)
 		 * APPLY enforce it.
 		 */
 		bgp = daemon_lookup_bgp(args->dnode, 3);
-		if (bgp && yang_dnode_get_uint32(args->dnode, NULL) !=
-				   bgp->as) {
+		if (bgp && yang_dnode_get_uint32(args->dnode, NULL) != bgp->as) {
 			snprintfrr(args->errmsg, args->errmsg_len,
-				   "instance AS is fixed at creation (current %u)",
-				   bgp->as);
+				   "instance AS is fixed at creation (current %u)", bgp->as);
 			return NB_ERR_VALIDATION;
 		}
 		return NB_OK;
@@ -1302,8 +1261,7 @@ int bgp_global_local_as_modify(struct nb_cb_modify_args *args)
 		return NB_ERR;
 	if (yang_dnode_get_uint32(args->dnode, NULL) != bgp->as) {
 		snprintfrr(args->errmsg, args->errmsg_len,
-			   "instance AS is fixed at creation (current %u)",
-			   bgp->as);
+			   "instance AS is fixed at creation (current %u)", bgp->as);
 		return NB_ERR;
 	}
 
@@ -1395,14 +1353,12 @@ int bgp_if_mpls_bgp_forwarding_modify(struct nb_cb_modify_args *args)
 	ifp = nb_running_get_entry(args->dnode, NULL, true);
 	iifp = ifp->info;
 	if (!iifp) {
-		snprintfrr(args->errmsg, args->errmsg_len,
-			   "interface %s not available", ifp->name);
+		snprintfrr(args->errmsg, args->errmsg_len, "interface %s not available", ifp->name);
 		return NB_ERR;
 	}
 
 	enable = yang_dnode_get_bool(args->dnode, NULL);
-	if (CHECK_FLAG(iifp->flags, BGP_INTERFACE_MPLS_BGP_FORWARDING) ==
-	    enable)
+	if (CHECK_FLAG(iifp->flags, BGP_INTERFACE_MPLS_BGP_FORWARDING) == enable)
 		return NB_OK;
 
 	COND_FLAG(iifp->flags, BGP_INTERFACE_MPLS_BGP_FORWARDING, enable);
@@ -1432,14 +1388,12 @@ int bgp_if_mpls_l3vpn_multi_domain_modify(struct nb_cb_modify_args *args)
 	ifp = nb_running_get_entry(args->dnode, NULL, true);
 	iifp = ifp->info;
 	if (!iifp) {
-		snprintfrr(args->errmsg, args->errmsg_len,
-			   "interface %s not available", ifp->name);
+		snprintfrr(args->errmsg, args->errmsg_len, "interface %s not available", ifp->name);
 		return NB_ERR;
 	}
 
 	enable = yang_dnode_get_bool(args->dnode, NULL);
-	if (CHECK_FLAG(iifp->flags, BGP_INTERFACE_MPLS_L3VPN_SWITCHING) ==
-	    enable)
+	if (CHECK_FLAG(iifp->flags, BGP_INTERFACE_MPLS_L3VPN_SWITCHING) == enable)
 		return NB_OK;
 
 	COND_FLAG(iifp->flags, BGP_INTERFACE_MPLS_L3VPN_SWITCHING, enable);
