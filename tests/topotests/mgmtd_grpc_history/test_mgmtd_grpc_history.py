@@ -21,7 +21,7 @@ import json
 import os
 
 import pytest
-from lib.common_config import step
+from lib.common_config import retry, step
 from lib.topogen import Topogen, TopoRouter
 
 CWD = os.path.dirname(os.path.realpath(__file__))
@@ -194,3 +194,90 @@ def test_history_reflects_real_commits(tgen):
 
     step("Clean up the I2 description")
     run_grpc_client(r1, f"commit-delete,{DESC_XPATH}")
+
+
+def _commit_desc_value(r1, value):
+    out = run_grpc_client(r1, f"commit-result,ALL,{DESC_XPATH}={value}")
+    return json.loads(out.strip().splitlines()[-1])
+
+
+def test_history_rotation_cap10(tgen):
+    """L4 (S066): the commit list is a ring capped at 10, newest
+    first; evicted ids never come back (contract §4.7)."""
+    r1 = tgen.gears["r1"]
+
+    step("commit 12 distinct values (each unique, no no-change aborts)")
+    last = None
+    for i in range(12):
+        resp = _commit_desc_value(r1, f"s066-rot-{i}")
+        assert resp["status"] == "OK", f"commit {i} failed: {resp}"
+        last = resp
+    assert last["transaction_id"] != 0, last
+
+    step("the list holds exactly 10 entries, newest first")
+    ids = [entry["id"] for entry in _list_transactions(r1)]
+    assert len(ids) == 10, f"cap 10 violated: {len(ids)}"
+    assert ids[0] == last["transaction_id"], (
+        f"newest-first violated: {ids[0]} != {last['transaction_id']}"
+    )
+
+    step("re-list is stable intra-run")
+    again = [entry["id"] for entry in _list_transactions(r1)]
+    assert again == ids, f"unstable list: {again} != {ids}"
+
+    step("cleanup")
+    run_grpc_client(r1, f"commit-delete,{DESC_XPATH}")
+
+
+def test_history_survives_kill9(tgen):
+    """L4 (S066): the commit history persists on disk across a kill -9
+    of mgmtd — ids stable cross-restart (FNV), configs identical
+    (contract §4.7)."""
+    r1 = tgen.gears["r1"]
+
+    step("seed two identifiable commits")
+    for tag in ("s066-k91", "s066-k92"):
+        resp = _commit_desc_value(r1, tag)
+        assert resp["status"] == "OK", resp
+    snapshot = _list_transactions(r1)
+    snap_ids = [entry["id"] for entry in snapshot]
+    snap_cfg = {i: _get_transaction(r1, i)["config"] for i in snap_ids[:2]}
+
+    step("kill -9 the mgmtd")
+    r1.cmd_raises("kill -9 $(cat /var/run/frr/mgmtd.pid)")
+
+    step("respawn mgmtd with the same listener options")
+    r1.cmd_raises(
+        "rm -f /var/run/frr/mgmtd.pid /var/run/frr/mgmtd.vty; "
+        "/usr/lib/frr/mgmtd -d -M grpc:50065"
+        " > /dev/null 2>&1"
+    )
+
+    @retry(30)
+    def _listener_up():
+        out = run_grpc_client(r1, "GETCAP")
+        return "frr-backend" in out
+
+    assert _listener_up(), "mgmtd listener did not come back"
+
+    step("ids and configs identical after the restart")
+    after_ids = [entry["id"] for entry in _list_transactions(r1)]
+    assert after_ids == snap_ids, f"ids changed: {after_ids} != {snap_ids}"
+    for i, cfg in snap_cfg.items():
+        assert _get_transaction(r1, i)["config"] == cfg, (
+            f"config of {i} changed across the restart"
+        )
+
+    step("no crash signature in the log")
+    with open(
+        os.path.join(tgen.logdir, "r1", "mgmtd.log"), encoding="utf-8"
+    ) as fh:
+        contents = fh.read()
+    assert "Received signal 11" not in contents
+    assert "SANITIZER" not in contents
+
+    step("cleanup: the ad-hoc description died with the restart (SSOT)")
+    try:
+        run_grpc_client(r1, f"commit-delete,{DESC_XPATH}")
+    except Exception:
+        pass

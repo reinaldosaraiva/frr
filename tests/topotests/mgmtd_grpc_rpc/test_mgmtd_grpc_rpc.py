@@ -443,3 +443,37 @@ def test_execute_rejects_unknown_rpc_via_mgmtd_grpc(tgen):
     )
     assert rc != 0
     assert "INVALID_ARGUMENT" in stdout + stderr
+
+
+def test_commit_phase_isolated_unimplemented(tgen):
+    """L7 (S066): only VALIDATE and ALL commit phases are implemented;
+    isolated PREPARE/APPLY/ABORT must answer UNIMPLEMENTED and leave
+    nothing behind (no history entry, no applied config)."""
+    r1 = tgen.gears["r1"]
+    desc = "/frr-interface:lib/interface[name='r1-eth0']/description"
+
+    def commit_phase(phase):
+        out = run_grpc_client(r1, f"commit-result,{phase},{desc}=s066-ph")
+        return json.loads(out.strip().splitlines()[-1])
+
+    step("isolated phases are UNIMPLEMENTED")
+    for phase in ("PREPARE", "APPLY", "ABORT"):
+        resp = commit_phase(phase)
+        assert resp["status"] == "UNIMPLEMENTED", f"{phase}: {resp}"
+
+    step("VALIDATE accepts the edit without recording history")
+    before = json.loads(
+        run_grpc_client(r1, "list-transactions-full,5").strip().splitlines()[-1]
+    )
+    resp = commit_phase("VALIDATE")
+    assert resp["status"] == "OK", f"VALIDATE: {resp}"
+    after = json.loads(
+        run_grpc_client(r1, "list-transactions-full,5").strip().splitlines()[-1]
+    )
+    assert [e["id"] for e in after] == [e["id"] for e in before], (
+        f"VALIDATE recorded a history entry:\n{before}\n{after}"
+    )
+
+    step("residue: nothing was applied by any phase")
+    rc, out, _ = run_grpc_client_status(r1, f"get-config,{desc}")
+    assert "s066-ph" not in out, f"a phase applied the edit:\n{out}"

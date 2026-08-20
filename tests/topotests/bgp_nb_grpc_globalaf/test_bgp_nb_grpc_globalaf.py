@@ -745,3 +745,57 @@ def test_global_afi_safi_lifecycle_grpc():
     assert "aggregate-address 239.77.0.0/16" not in output, (
         f"entry destroy left the child render:\n{output}"
     )
+
+
+def test_set_to_default_rejected_grpc():
+    """L1 (S066): creating a leaf with the exact yang default value
+    fails the EditCandidate (enum/boolean quirk, contract S2.10(b)) --
+    consumers must omit the leaf, never write it at its default. The
+    rejected commit leaves the datastore untouched."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+    AFM = (
+        f"{CPP}/global/afi-safis"
+        "/afi-safi[afi-safi-name='frr-routing:ipv4-multicast']"
+    )
+    AGG = f"{AFM}/ipv4-multicast/aggregate-route[prefix='239.88.0.0/16']"
+
+    def ds_has(xpath, needle):
+        rc, output, _ = run_grpc_client_status(r1, f"get-config,{xpath}")
+        return rc == 0 and needle in output
+
+    _seed(r1)
+
+    step("the boolean leaf is absent from the datastore")
+    assert not ds_has(f"{CPP}/global/ebgp-requires-policy", "false")
+
+    step("NEG boolean: creating the leaf at its default value fails")
+    _commit_rejected(r1, f"commit-set,{CPP}/global/ebgp-requires-policy=true")
+    assert not ds_has(f"{CPP}/global/ebgp-requires-policy", "true"), (
+        "rejected default-write landed in the datastore"
+    )
+
+    step("control: a non-default value applies and lands in the datastore")
+    run_grpc_client(r1, f"commit-set,{CPP}/global/ebgp-requires-policy=false")
+    assert ds_has(f"{CPP}/global/ebgp-requires-policy", "false"), (
+        "non-default write not recorded"
+    )
+
+    step("cleanup: destroy the leaf")
+    run_grpc_client(r1, f"commit-delete,{CPP}/global/ebgp-requires-policy")
+    assert not ds_has(f"{CPP}/global/ebgp-requires-policy", "false"), (
+        "destroy left the leaf behind"
+    )
+
+    step("NEG enum: creating origin at its default value fails")
+    run_grpc_client(r1, f"commit-set,{AGG}/as-set=true")
+    _commit_rejected(r1, f"commit-set,{AGG}/origin=unspecified")
+
+    step("control: a non-default enum value is recorded")
+    run_grpc_client(r1, f"commit-set,{AGG}/origin=igp")
+    assert ds_has(f"{AGG}/origin", "igp"), (
+        "non-default enum not recorded"
+    )
+
+    step("cleanup: remove the aggregate entry")
+    run_grpc_client(r1, f"commit-delete,{AGG}")

@@ -636,3 +636,97 @@ def test_bfd_session_type_accepted_grpc():
     # aggregated unimplemented warning only reaches the daemon log
     # buffer, which this rig does not configure). The RED proof for
     # the bfd-options family rides on test_bfd_options_ctx_grpc.
+
+
+def _peer_lines(output, peer):
+    return [
+        ln for ln in output.splitlines()
+        if ln.strip().startswith(f"neighbor {peer} ")
+    ]
+
+
+def test_peer_group_attach_destroy_deletes_peer():
+    """L10 (S066): destroying the neighbor peer-group attach through
+    the datastore deletes the WHOLE peer (legacy CLI semantics mirrored,
+    contract §2.9(c)) — not just the attachment."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+    PG2 = "l10-pg"
+    NBPG2 = f"{CPP}/peer-groups/peer-group[peer-group-name='{PG2}']"
+
+    _seed(r1)
+
+    step("create the group with non-default knobs")
+    run_grpc_client(
+        r1,
+        [
+            f"commit-set,{NBPG2}/neighbor-remote-as/remote-as-type=as-specified,"
+            f"{NBPG2}/neighbor-remote-as/remote-as=65101",
+            f"commit-set,{NBPG2}/timers/keepalive=20,"
+            f"{NBPG2}/timers/hold-time=50",
+            f"commit-set,{NBPG2}/description=pg-l10",
+        ],
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"neighbor {PG2} description pg-l10" in output, (
+        f"pg description missing:\n{output}"
+    )
+
+    step("create the neighbor and attach it to the group")
+    run_grpc_client(
+        r1,
+        f"commit-set,{NB}/neighbor-remote-as/remote-as-type=as-specified,"
+        f"{NB}/neighbor-remote-as/remote-as=65200,"
+        f"{NB}/description=nb-l10,{NB}/peer-group={PG2}",
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"neighbor {PEER} peer-group {PG2}" in output, (
+        f"attach line missing from the render:\n{output}"
+    )
+    assert f"neighbor {PEER} remote-as 65200" in output, (
+        f"neighbor remote-as missing from the render:\n{output}"
+    )
+
+    step("destroy the attach: the whole peer must disappear at runtime")
+    run_grpc_client(r1, f"commit-delete,{NB}/peer-group")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert not _peer_lines(output, PEER), (
+        f"teardown-inteiro violated (peer survived the attach destroy):\n"
+        f"{_peer_lines(output, PEER)}"
+    )
+
+    # ACHADO L10 (S066): the datastore KEEPS the neighbor subtree after
+    # the attach destroy -- the leaf-destroy deletes the whole peer in
+    # bgpd but the candidate diff only removed the peer-group leaf
+    # (runtime=0 / datastore=1, mirror of the C04 seam). Registered as
+    # divergence D15 for the owner; consumers that want coherence must
+    # destroy {NB} itself. The assert pins the CURRENT semantics as a
+    # tripwire: if this ever changes, the contract nuance 2.9(c) needs
+    # a matching amendment.
+    step("datastore retains the ghost neighbor (documented divergence)")
+    out = run_grpc_client(r1, f"get-config,{NB}")
+    assert "remote-as" in out, (
+        f"datastore dropped the ghost (semantics changed -- amend 2.9(c)):\n"
+        f"{out}"
+    )
+
+    step("control: destroy the ghost then recreate the peer attached")
+    run_grpc_client(r1, f"commit-delete,{NB}")
+    run_grpc_client(
+        r1,
+        f"commit-set,{NB}/neighbor-remote-as/remote-as-type=as-specified,"
+        f"{NB}/neighbor-remote-as/remote-as=65200,{NB}/peer-group={PG2}",
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"neighbor {PEER} peer-group {PG2}" in output, (
+        f"recreation did not bring the peer back:\n{output}"
+    )
+
+    step("final teardown (single commits)")
+    run_grpc_client(r1, f"commit-delete,{NB}")
+    run_grpc_client(r1, f"commit-delete,{NBPG2}")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert not [ln for ln in output.splitlines()
+                if ln.strip().startswith(f"neighbor {PG2} ")], (
+        f"pg survived the teardown:\n{output}"
+    )
