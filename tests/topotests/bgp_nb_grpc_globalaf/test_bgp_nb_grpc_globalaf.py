@@ -781,8 +781,16 @@ def test_set_to_default_rejected_grpc():
         "non-default write not recorded"
     )
 
-    step("cleanup: destroy the leaf")
-    run_grpc_client(r1, f"commit-delete,{CPP}/global/ebgp-requires-policy")
+    step("transition non-default -> default is an implicit removal")
+    run_grpc_client(r1, f"commit-set,{CPP}/global/ebgp-requires-policy=true")
+    assert not ds_has(f"{CPP}/global/ebgp-requires-policy", "true"), (
+        "default write must normalize the leaf out of the datastore"
+    )
+    output = _render(r1)
+    assert "no bgp ebgp-requires-policy" not in output, (
+        f"runtime did not normalize to the default form:\n{output}"
+    )
+    step("cleanup: the leaf is already gone (implicit removal)")
     assert not ds_has(f"{CPP}/global/ebgp-requires-policy", "false"), (
         "destroy left the leaf behind"
     )

@@ -710,6 +710,13 @@ def test_peer_group_attach_destroy_deletes_peer():
         f"{out}"
     )
 
+    step("re-attach over the ghost is a runtime no-op (divergence)")
+    run_grpc_client(r1, f"commit-set,{NB}/peer-group={PG2}")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert not _peer_lines(output, PEER), (
+        f"re-attach over the ghost resurrected the peer:\n{output}"
+    )
+
     step("control: destroy the ghost then recreate the peer attached")
     run_grpc_client(r1, f"commit-delete,{NB}")
     run_grpc_client(
