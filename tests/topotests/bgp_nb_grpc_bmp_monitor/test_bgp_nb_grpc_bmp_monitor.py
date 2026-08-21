@@ -366,6 +366,61 @@ def test_bmp_monitor_cli_parity_after_refactor():
     )
 
 
+def test_bmp_monitor_pre_policy_cli_parity():
+    """S060 r1 M-2 debt: the pre-policy CLI parity. Test 4 covered
+    only loc-rib on the CLI side; here the gRPC commit of
+    pre-policy renders as the exact legacy line and the CLI
+    set/unset keeps working through the shared bmp_monitor_apply()
+    internal (dual-write regression guard)."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+
+    _seed(r1)
+    _seed_target(r1, TARGET_CLI)
+
+    step("gRPC: pre-policy lands and renders as the legacy line")
+    run_grpc_client(
+        r1, f"commit-set,{bmp_common(TARGET_CLI)}/pre-policy=true"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "bmp monitor l2vpn evpn pre-policy" in output, (
+        f"pre-policy missing from the render:\n{output}"
+    )
+
+    step("CLI: unset pre-policy (dual-write through the shared internal)")
+    r1.vtysh_cmd(
+        "configure terminal\n"
+        "router bgp 65000\n"
+        f"bmp targets {TARGET_CLI}\n"
+        "no bmp monitor l2vpn evpn pre-policy\n"
+        "end\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "bmp monitor l2vpn evpn pre-policy" not in output, (
+        f"pre-policy must be gone after the CLI unset:\n{output}"
+    )
+
+    step("CLI: set pre-policy back")
+    r1.vtysh_cmd(
+        "configure terminal\n"
+        "router bgp 65000\n"
+        f"bmp targets {TARGET_CLI}\n"
+        "bmp monitor l2vpn evpn pre-policy\n"
+        "end\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "bmp monitor l2vpn evpn pre-policy" in output, (
+        f"pre-policy must be back after the CLI set:\n{output}"
+    )
+
+    step("teardown: destroy the whole datastore target")
+    run_grpc_client(r1, f"commit-delete,{bmp_target(TARGET_CLI)}")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "bmp monitor l2vpn evpn pre-policy" not in output, (
+        f"pre-policy must be gone after the teardown:\n{output}"
+    )
+
+
 # ---- s061: Fase D fatia 1 -- target lifecycle, non-EVPN fanout and
 # knobs (wire-all-32 decision, D3). RED on the s060 head (7bc7b9a30):
 # every bmp-config xpath below the target-list was a warn-class
