@@ -696,3 +696,151 @@ def test_bmp_same_transaction_as_local_as():
     run_grpc_client(
         r1, f"commit-delete,{CPP}/global/bmp-config/mirror-buffer-limit"
     )
+
+
+def test_bmp_destroy_cli_created_target_noop():
+    """L8 (S068): the two faces of the ghost-entry destroy semantics
+    (contract S2.8(c)). Face A: a CLI-created target is not tracked
+    by the datastore, so deleting it through the datastore fails the
+    EditCandidate (INVALID_ARGUMENT, F1b). Face B: a datastore-tracked
+    target whose runtime object was removed by the legacy CLI is a
+    runtime-absent ghost; destroying it is a tolerant teardown (rc 0,
+    datastore and render both clean). Known wart pinned below: the
+    success response still carries the "not found" error_message
+    from the tolerant lookup (S068 finding; the errmsg pollution of
+    bgp_nb_bmp_target_lookup)."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+    name_cli = "bt-ghost-cli"
+    name_ds = "bt-ghost-ds"
+
+    _seed(r1)
+
+    step("face A: CLI-created target is invisible to the datastore")
+    _seed_target(r1, name_cli)
+    rc, output, _ = run_grpc_client_status(
+        r1, f"commit-delete,{bmp_target(name_cli)}"
+    )
+    rejected = (
+        rc != 0
+        or "Failed to remove" in output
+        or "error_message" in output
+    )
+    assert rejected, (
+        f"delete of a datastore-absent node must fail the candidate:\n{output}"
+    )
+    out = r1.vtysh_cmd("show running-config bgpd")
+    assert f"bmp targets {name_cli}" in out, (
+        f"rejected candidate delete must not tear the runtime down:\n{out}"
+    )
+    r1.vtysh_cmd(
+        "configure terminal\n"
+        "router bgp 65000\n"
+        f"no bmp targets {name_cli}\n"
+        "end\n"
+    )
+
+    step("face B: create the target through the datastore")
+    tgt = bmp_target(name_ds)
+    run_grpc_client(r1, f"commit-set,{tgt}/mirror=true")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"bmp targets {name_ds}" in output, (
+        f"datastore-created target must render:\n{output}"
+    )
+    out = run_grpc_client(r1, f"get-config,{tgt}")
+    assert name_ds in out, f"datastore must track the target:\n{out}"
+
+    step("the legacy CLI removes the runtime object only (ghost)")
+    r1.vtysh_cmd(
+        "configure terminal\n"
+        "router bgp 65000\n"
+        f"no bmp targets {name_ds}\n"
+        "end\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"bmp targets {name_ds}" not in output, (
+        f"CLI teardown must remove the runtime object:\n{output}"
+    )
+    out = run_grpc_client(r1, f"get-config,{tgt}")
+    assert name_ds in out, (
+        f"the datastore must still hold the ghost entry:\n{out}"
+    )
+
+    step("destroy of the runtime-absent entry is a tolerant teardown")
+    rc, output, _ = run_grpc_client_status(r1, f"commit-delete,{tgt}")
+    assert rc == 0, f"tolerant ghost destroy failed:\n{output}"
+    if "error_message" in output:
+        assert "not found" in output, (
+            f"unexpected error_message in the tolerant destroy:\n{output}"
+        )
+
+    step("coherence: runtime and datastore are both clean")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"bmp targets {name_ds}" not in output, (
+        f"ghost target must be gone from the render:\n{output}"
+    )
+    rc, out, _ = run_grpc_client_status(
+        r1, f"get-config,{CPP}/global/bmp-config"
+    )
+    assert name_ds not in out, f"datastore kept the destroyed entry:\n{out}"
+
+
+def test_bmp_import_vrf_no_bgp_instance_tolerated():
+    """L9 (S068): import-vrf pointing at a VRF with no bgp instance
+    is tolerated -- the view bib is created without sync, consistent
+    with the legacy CLI (contract S2.8(d))."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+    vrf = "novrf"
+    name = "bt-l9"
+    name_cli = "bt-l9-cli"
+
+    step("precondition: the VRF has no bgp instance")
+    output = r1.vtysh_cmd(f"show bgp vrf {vrf} summary")
+    assert "BGP router identifier" not in output, (
+        f"unexpected live bgp instance in {vrf}:\n{output}"
+    )
+
+    _seed(r1)
+    tgt = bmp_target(name)
+
+    step("commit-set import-vrf=<vrf without bgp instance> is accepted")
+    rc, output, _ = run_grpc_client_status(
+        r1, f"commit-set,{tgt}/import-vrf={vrf}"
+    )
+    ok = (
+        rc == 0
+        and "error_message" not in output
+        and "details" not in output
+    )
+    assert ok, f"tolerated import-vrf must apply:\n{output}"
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"bmp import-vrf-view {vrf}" in output, (
+        f"import-vrf-view must render:\n{output}"
+    )
+
+    step("CLI parity: the legacy CLI renders the same line")
+    r1.vtysh_cmd(
+        "configure terminal\n"
+        "router bgp 65000\n"
+        f"bmp targets {name_cli}\n"
+        f"bmp import-vrf-view {vrf}\n"
+        "end\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert output.count(f"bmp import-vrf-view {vrf}") == 2, (
+        f"CLI target must render the same line:\n{output}"
+    )
+
+    step("teardown: datastore target plus CLI target")
+    run_grpc_client(r1, f"commit-delete,{tgt}")
+    r1.vtysh_cmd(
+        "configure terminal\n"
+        "router bgp 65000\n"
+        f"no bmp targets {name_cli}\n"
+        "end\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"bmp import-vrf-view {vrf}" not in output, (
+        f"teardown left import-vrf-view behind:\n{output}"
+    )

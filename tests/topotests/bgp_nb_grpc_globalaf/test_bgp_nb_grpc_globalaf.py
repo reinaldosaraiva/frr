@@ -807,3 +807,41 @@ def test_set_to_default_rejected_grpc():
 
     step("cleanup: remove the aggregate entry")
     run_grpc_client(r1, f"commit-delete,{AGG}")
+
+
+def test_aggregate_multicast_prefix_pattern_rejected():
+    """L3 (S068): the ipv4-multicast aggregate-route key carries the
+    yang ipv4-multicast-group-prefix pattern (224.0.0.0/4 only) -- an
+    out-of-range prefix fails the EditCandidate closed at schema
+    validation and leaves no residue (contract S2.10(d))."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+    AFM = (
+        f"{CPP}/global/afi-safis"
+        "/afi-safi[afi-safi-name='frr-routing:ipv4-multicast']"
+    )
+    AGG_BAD = f"{AFM}/ipv4-multicast/aggregate-route[prefix='10.77.0.0/16']"
+    AGG_OK = f"{AFM}/ipv4-multicast/aggregate-route[prefix='232.0.0.0/8']"
+
+    _seed(r1)
+
+    step("NEG: a prefix outside 224.0.0.0/4 fails the schema pattern")
+    _commit_rejected(r1, f"commit-set,{AGG_BAD}/as-set=true")
+
+    step("residue: the datastore and the render stay clean")
+    rc, out, _ = run_grpc_client_status(r1, f"get-config,{AFM}")
+    assert "10.77.0.0" not in out, f"rejected prefix landed in DS:\n{out}"
+    output = _render(r1)
+    assert "aggregate-address 10.77" not in output, (
+        f"rejected prefix rendered:\n{output}"
+    )
+
+    step("adjacent control: a prefix inside the range applies")
+    run_grpc_client(r1, f"commit-set,{AGG_OK}/as-set=true")
+    output = _render(r1)
+    assert "aggregate-address 232.0.0.0/8 as-set" in output, (
+        f"in-range aggregate missing:\n{output}"
+    )
+
+    step("cleanup")
+    run_grpc_client(r1, f"commit-delete,{AGG_OK}")
