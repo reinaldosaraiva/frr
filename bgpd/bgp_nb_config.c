@@ -10725,6 +10725,7 @@ int bgp_bmp_target_list_create(struct nb_cb_create_args *args)
 int bgp_bmp_target_list_destroy(struct nb_cb_destroy_args *args)
 {
 	struct bmp_targets *bt;
+	char dummy[256];
 
 	switch (args->event) {
 	case NB_EV_VALIDATE:
@@ -10738,8 +10739,10 @@ int bgp_bmp_target_list_destroy(struct nb_cb_destroy_args *args)
 		break;
 	}
 
-	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
-				      args->errmsg_len);
+	/* tolerant of a runtime-absent entry: the lookup error is not
+	 * surfaced (the destroy is an explicit no-op success)
+	 */
+	bt = bgp_nb_bmp_target_lookup(args->dnode, dummy, sizeof(dummy));
 	if (!bt)
 		/* nothing to clean up on the runtime side */
 		return NB_OK;
@@ -10775,6 +10778,7 @@ int bgp_bmp_af_list_destroy(struct nb_cb_destroy_args *args)
 	const char *afi_safi_id;
 	afi_t afi;
 	safi_t safi;
+	char dummy[256];
 
 	switch (args->event) {
 	case NB_EV_VALIDATE:
@@ -10788,8 +10792,10 @@ int bgp_bmp_af_list_destroy(struct nb_cb_destroy_args *args)
 		break;
 	}
 
-	bt = bgp_nb_bmp_target_lookup(args->dnode, args->errmsg,
-				      args->errmsg_len);
+	/* tolerant of a runtime-absent target: same no-op semantics as
+	 * the target-list destroy, lookup error not surfaced
+	 */
+	bt = bgp_nb_bmp_target_lookup(args->dnode, dummy, sizeof(dummy));
 	if (!bt)
 		return NB_OK;
 	afi_safi_id = yang_dnode_get_string(args->dnode, "afi-safi-name");

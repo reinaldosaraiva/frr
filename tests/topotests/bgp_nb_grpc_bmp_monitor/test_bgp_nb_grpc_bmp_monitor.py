@@ -704,11 +704,10 @@ def test_bmp_destroy_cli_created_target_noop():
     by the datastore, so deleting it through the datastore fails the
     EditCandidate (INVALID_ARGUMENT, F1b). Face B: a datastore-tracked
     target whose runtime object was removed by the legacy CLI is a
-    runtime-absent ghost; destroying it is a tolerant teardown (rc 0,
-    datastore and render both clean). Known wart pinned below: the
-    success response still carries the "not found" error_message
-    from the tolerant lookup (S068 finding; the errmsg pollution of
-    bgp_nb_bmp_target_lookup)."""
+    runtime-absent ghost; destroying it is a tolerant teardown -- a
+    CLEAN success (rc 0, no error_message; the S069 fix stopped the
+    tolerant lookup from polluting the commit response) with both
+    datastore and render coherent afterwards."""
     tgen = get_topogen()
     r1 = tgen.gears["r1"]
     name_cli = "bt-ghost-cli"
@@ -768,11 +767,12 @@ def test_bmp_destroy_cli_created_target_noop():
 
     step("destroy of the runtime-absent entry is a tolerant teardown")
     rc, output, _ = run_grpc_client_status(r1, f"commit-delete,{tgt}")
-    assert rc == 0, f"tolerant ghost destroy failed:\n{output}"
-    if "error_message" in output:
-        assert "not found" in output, (
-            f"unexpected error_message in the tolerant destroy:\n{output}"
-        )
+    ok = (
+        rc == 0
+        and "error_message" not in output
+        and "details" not in output
+    )
+    assert ok, f"tolerant ghost destroy must be a clean success:\n{output}"
 
     step("coherence: runtime and datastore are both clean")
     output = r1.vtysh_cmd("show running-config bgpd")
