@@ -477,3 +477,62 @@ def test_commit_phase_isolated_unimplemented(tgen):
     step("residue: nothing was applied by any phase")
     rc, out, _ = run_grpc_client_status(r1, f"get-config,{desc}")
     assert "s066-ph" not in out, f"a phase applied the edit:\n{out}"
+
+
+def test_adhoc_commit_dies_on_mgmtd_restart(tgen):
+    """L5 (S070): a commit applied ad-hoc (outside the replay set) is
+    ephemeral -- restarting mgmtd discards it, and the channel is
+    healthy again right after (contract nuance 4.9, SSOT)."""
+    r1 = tgen.gears["r1"]
+    desc = "/frr-interface:lib/interface[name='r1-eth0']/description"
+
+    step("ad-hoc commit lands in the running datastore")
+    run_grpc_client(r1, f"commit-set,{desc}=adhoc-s070")
+    output = run_grpc_client(r1, f"get-config,{desc}")
+    assert "adhoc-s070" in output, (
+        f"ad-hoc value missing before the restart:\n{output}"
+    )
+
+    step("restart mgmtd (kill -9 + respawn, S066 liturgy)")
+    r1.cmd_raises("kill -9 $(cat /var/run/frr/mgmtd.pid)")
+    r1.cmd_raises(
+        "rm -f /var/run/frr/mgmtd.pid /var/run/frr/mgmtd.vty; "
+        "/usr/lib/frr/mgmtd -d -M grpc:50057"
+        " > /dev/null 2>&1"
+    )
+
+    @retry(30)
+    def _listener_up():
+        out = run_grpc_client(r1, "GETCAP")
+        return None if "frr-backend" in out else "listener not back yet"
+
+    assert _listener_up() is None, "mgmtd listener did not come back"
+
+    step("the ad-hoc value died with the restart (SSOT)")
+    rc, out, _ = run_grpc_client_status(r1, f"get-config,{desc}")
+    assert "adhoc-s070" not in out, (
+        f"ad-hoc commit survived the mgmtd restart:\n{out}"
+    )
+
+    step("positive control: the channel commits again after the restart")
+    @retry(60)
+    def _commit_again():
+        run_grpc_client(r1, f"commit-set,{desc}=adhoc-s070")
+        return None
+
+    assert _commit_again() is None, "commit did not succeed after restart"
+    output = run_grpc_client(r1, f"get-config,{desc}")
+    assert "adhoc-s070" in output, (
+        f"post-restart commit did not land:\n{output}"
+    )
+
+    step("no crash signature in the log")
+    with open(
+        os.path.join(tgen.logdir, "r1", "mgmtd.log"), encoding="utf-8"
+    ) as fh:
+        contents = fh.read()
+    assert "Received signal 11" not in contents
+    assert "SANITIZER" not in contents
+
+    step("cleanup")
+    run_grpc_client(r1, f"commit-delete,{desc}")
