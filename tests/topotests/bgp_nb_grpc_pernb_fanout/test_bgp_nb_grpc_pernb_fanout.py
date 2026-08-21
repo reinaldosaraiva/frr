@@ -737,3 +737,101 @@ def test_peer_group_attach_destroy_deletes_peer():
                 if ln.strip().startswith(f"neighbor {PG2} ")], (
         f"pg survived the teardown:\n{output}"
     )
+
+
+def test_path_attribute_discard_and_withdraw_render():
+    """S062 r2 N-1 debt: path-attribute discard/treat-as-withdraw
+    leaf-list entries land through gRPC on an eBGP peer and render in
+    show running-config bgpd as the exact legacy lines; the guard
+    family (LOCAL_PREF discard only for eBGP, S062 r2 B-2) rejects
+    the iBGP commit; per-entry teardown clears the lines."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+
+    _seed(r1)
+    _num_peer(r1)
+
+    step("discard entries land and render (5=LOCAL_PREF, eBGP-legal)")
+    run_grpc_client(
+        r1,
+        [
+            f"commit-set,{NB}/path-attribute/discard=5",
+            f"commit-set,{NB}/path-attribute/discard=8",
+        ],
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"neighbor {PEER} path-attribute discard 5 8" in output, (
+        f"path-attribute discard missing from the render:\n{output}"
+    )
+
+    step("treat-as-withdraw entry lands and renders")
+    run_grpc_client(
+        r1, f"commit-set,{NB}/path-attribute/treat-as-withdraw=7"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"neighbor {PEER} path-attribute treat-as-withdraw 7" in output, (
+        f"path-attribute treat-as-withdraw missing from the render:\n{output}"
+    )
+
+    step("per-entry teardown: delete one discard entry, line shrinks")
+    run_grpc_client(r1, f"commit-delete,{NB}/path-attribute/discard[.='8']")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"neighbor {PEER} path-attribute discard 5" in output, (
+        f"remaining discard entry must render:\n{output}"
+    )
+    assert "path-attribute discard 5 8" not in output, (
+        f"deleted entry must leave the render:\n{output}"
+    )
+
+    step("guard: LOCAL_PREF discard on an iBGP peer is rejected")
+    nb_ib = f"{CPP}/neighbors/neighbor[remote-address='10.0.1.2']"
+    run_grpc_client(
+        r1,
+        f"commit-set,{nb_ib}/neighbor-remote-as/remote-as-type=as-specified,"
+        f"{nb_ib}/neighbor-remote-as/remote-as=65000",
+    )
+    rc, out_g, _ = run_grpc_client_status(
+        r1, f"commit-set,{nb_ib}/path-attribute/discard=5"
+    )
+    assert "only for eBGP" in out_g, (
+        f"iBGP LOCAL_PREF discard must be rejected:\n{out_g}"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    ib_lines = [
+        ln for ln in output.splitlines()
+        if ln.strip().startswith(f"neighbor 10.0.1.2 ")
+        and "path-attribute" in ln
+    ]
+    assert not ib_lines, (
+        f"rejected entry must not reach the runtime "
+        f"(dirty-DS on APPLY-rejection is the known mgmtd property, "
+        f"§2.9(d)):\n{ib_lines}"
+    )
+
+    step("unnumbered context: discard lands and renders on the interface")
+    run_grpc_client(
+        r1, f"commit-set,{NBIF}/path-attribute/discard=13"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert f"neighbor {IFPEER} path-attribute discard 13" in output, (
+        f"unnumbered path-attribute discard missing:\n{output}"
+    )
+    run_grpc_client(r1, f"commit-delete,{NBIF}/path-attribute/discard[.='13']")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "path-attribute discard 13" not in output, (
+        f"unnumbered discard must be gone:\n{output}"
+    )
+
+    step("final teardown")
+    run_grpc_client(r1, f"commit-delete,{NB}/path-attribute/discard[.='5']")
+    run_grpc_client(
+        r1, f"commit-delete,{NB}/path-attribute/treat-as-withdraw[.='7']"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "path-attribute discard" not in output, (
+        f"discard must be gone after teardown:\n{output}"
+    )
+    assert "path-attribute treat-as-withdraw" not in output, (
+        f"treat-as-withdraw must be gone after teardown:\n{output}"
+    )
+    run_grpc_client(r1, f"commit-delete,{nb_ib}")
