@@ -526,3 +526,97 @@ def test_cli_write_keeps_authority_and_datastore_intact():
     assert "prefix-limit" in out or "direction-list" in out, (
         f"datastore view lost the prefix-limit subtree: {out}"
     )
+
+
+def test_prefix_limit_cli_reemit_clears_stale_options():
+    """P003 (Greptile #40): re-issuing `maximum-prefix` WITHOUT a
+    previously configured option/force must clear it from both
+    planes. The datastore mirror lives in bgpd's own northbound
+    copy: without the mirror-clear, the northbound apply of the
+    very same batch dragged the stale datastore values back into
+    the runtime (peer_maximum_prefix_set() re-applied them), so the
+    re-issue was a no-op for the omitted knobs on BOTH planes and
+    the runtime render kept `500 80 warning-only force` on base
+    221666459f (RED). The gRPC get-config view of the mgmtd DS is
+    NOT the oracle for CLI re-issues (NB_CLIENT_CLI: mgmtd only
+    tracks mgmtd-fronted commits -- pinned by the sibling
+    test_cli_write_keeps_authority_and_datastore_intact)."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+    dl = f"{AF}/prefix-limit/direction-list[direction='in']"
+
+    step("State the full tw case + force through one gRPC commit")
+    run_grpc_client(
+        r1,
+        [
+            f"commit-set,{dl}/max-prefixes=1000",
+            f"commit-result,ALL,"
+            f"{dl}/options/tw-shutdown-threshold-pct=80,"
+            f"{dl}/options/tw-warning-only=true,"
+            f"{dl}/force-check=true",
+        ],
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "maximum-prefix 1000 80 warning-only force" in output, (
+        f"expected tw case + force on legacy CLI; got:\n{output}"
+    )
+
+    step("Re-issue bare through the legacy CLI")
+    r1.vtysh_cmd(
+        "configure terminal\nrouter bgp 65000\n"
+        "address-family ipv4 unicast\n"
+        "neighbor 10.0.0.2 maximum-prefix 500\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "maximum-prefix 500" in output, (
+        f"re-issue must render; got:\n{output}"
+    )
+    assert "warning-only" not in output and " force" not in output, (
+        f"BASE: the stale mirror dragged the omitted knobs back "
+        f"(no-op on both planes); got:\n{output}"
+    )
+
+    step("Re-affirm through gRPC: the diff apply must not resurrect them")
+    run_grpc_client(r1, f"commit-set,{dl}/max-prefixes=500")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "maximum-prefix 500" in output, (
+        f"re-affirm must render; got:\n{output}"
+    )
+    assert "warning-only" not in output and " force" not in output, (
+        f"stale mirror resurrected the knobs on the gRPC apply; "
+        f"got:\n{output}"
+    )
+
+    step("CLI case switch: tr case, then re-emit threshold-only")
+    r1.vtysh_cmd(
+        "configure terminal\nrouter bgp 65000\n"
+        "address-family ipv4 unicast\n"
+        "neighbor 10.0.0.2 maximum-prefix 600 restart 5\n"
+    )
+    r1.vtysh_cmd(
+        "configure terminal\nrouter bgp 65000\n"
+        "address-family ipv4 unicast\n"
+        "neighbor 10.0.0.2 maximum-prefix 700 90\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "maximum-prefix 700 90" in output, (
+        f"expected bare threshold on legacy CLI; got:\n{output}"
+    )
+    assert "restart" not in output, f"restart must clear; got:\n{output}"
+
+    step("gRPC re-affirm: the new case only, no stale siblings")
+    run_grpc_client(r1, f"commit-set,{dl}/max-prefixes=700")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "maximum-prefix 700 90" in output, (
+        f"threshold must survive the gRPC re-affirm; got:\n{output}"
+    )
+    assert "restart" not in output, (
+        f"stale restart-timer resurrected on apply; got:\n{output}"
+    )
+
+    step("Destroy the direction-list; nothing survives")
+    run_grpc_client(r1, f"commit-delete,{dl}")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "maximum-prefix" not in output, (
+        f"destroy must clear the render; got:\n{output}"
+    )
