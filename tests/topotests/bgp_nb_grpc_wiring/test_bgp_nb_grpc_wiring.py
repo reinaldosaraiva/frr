@@ -551,13 +551,17 @@ def test_prefix_limit_cli_reemit_clears_stale_options():
         [
             f"commit-set,{dl}/max-prefixes=1000",
             f"commit-result,ALL,"
-            f"{dl}/options/tw-shutdown-threshold-pct=80,"
+            # threshold at EXACTLY the yang default (75): the stale
+# snapshot cannot tell absent from default in the runtime
+# (review MAJOR -- the datastore must answer, not the knobs)
+f"{dl}/options/tw-shutdown-threshold-pct=75,"
             f"{dl}/options/tw-warning-only=true,"
             f"{dl}/force-check=true",
         ],
     )
     output = r1.vtysh_cmd("show running-config bgpd")
-    assert "maximum-prefix 1000 80 warning-only force" in output, (
+    # the legacy render omits a threshold at the default value (75)
+    assert "maximum-prefix 1000 warning-only force" in output, (
         f"expected tw case + force on legacy CLI; got:\n{output}"
     )
 

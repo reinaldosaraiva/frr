@@ -10396,19 +10396,69 @@ ALIAS_HIDDEN(no_neighbor_unsuppress_map, no_neighbor_unsuppress_map_hidden_cmd,
 
 
 /*
+ * Stale-option snapshot from the datastore (P003/Greptile #40): the
+ * pre-set option state must come from the candidate datastore (the
+ * running copy the CLI edits), not from the runtime knobs -- a
+ * threshold configured at exactly the default value (75) is
+ * indistinguishable from an absent threshold in the runtime, and the
+ * runtime flags may reflect inherited peer-group state the member
+ * datastore does not carry. Destroys of absent leaves are tolerated,
+ * so a datastore-driven snapshot is always safe.
+ */
+#define BGP_NB_PL_AF_SUFFIX                                                                       \
+	"/afi-safis/afi-safi[afi-safi-name='%s']/%s"                                              \
+	"/prefix-limit/direction-list[direction='in']/%s"
+
+static bool bgp_nb_pl_ds_option(struct vty *vty, const struct peer *peer, afi_t afi, safi_t safi,
+				const char *leaf)
+{
+	const char *af_name, *cont;
+	const struct bgp *bgp = VTY_GET_CONTEXT(bgp);
+	union sockunion su;
+
+	if (!bgp)
+		return false;
+
+	af_name = bgp_nb_af_yang_name(afi, safi);
+	if (!af_name)
+		return false;
+	cont = strchr(af_name, ':');
+	if (!cont || strmatch(cont + 1, "l2vpn-vpls"))
+		return false;
+	cont++;
+
+	if (CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP))
+		return yang_dnode_existsf(vty->candidate_config->dnode,
+					  BGP_PEER_GROUP_XPATH BGP_NB_PL_AF_SUFFIX, "frr-bgp:bgp",
+					  bgp_nb_cpp_name(bgp), bgp_nb_vrf_key(bgp),
+					  peer->group->name, af_name, cont, leaf);
+	if (peer->conf_if)
+		return yang_dnode_existsf(vty->candidate_config->dnode,
+					  BGP_UNNUMBERED_NEIGHBOR_XPATH BGP_NB_PL_AF_SUFFIX,
+					  "frr-bgp:bgp", bgp_nb_cpp_name(bgp), bgp_nb_vrf_key(bgp),
+					  peer->conf_if, af_name, cont, leaf);
+	if (str2sockunion(peer->host, &su) == 0)
+		return yang_dnode_existsf(vty->candidate_config->dnode,
+					  BGP_NEIGHBOR_XPATH BGP_NB_PL_AF_SUFFIX, "frr-bgp:bgp",
+					  bgp_nb_cpp_name(bgp), bgp_nb_vrf_key(bgp), peer->host,
+					  af_name, cont, leaf);
+	return false;
+}
+
+/*
  * Prefix-limit dual write: mirrors a successful legacy
  * peer_maximum_prefix_{set,unset}() into the YANG datastore. Works
  * across the three neighbor contexts (numbered, unnumbered,
  * peer-group) by picking the datastore base from the resolved peer.
  * set=false enqueues the direction-list DESTROY.
  */
-static void bgp_nb_peer_maximum_prefix_dual(struct vty *vty,
-					    const char *peer_arg,
-					    afi_t afi, safi_t safi, bool set,
-					    bool out, const char *num,
-					    const char *threshold,
-					    int warning, const char *restart,
-					    const char *force)
+static void bgp_nb_peer_maximum_prefix_dual(struct vty *vty, const char *peer_arg, afi_t afi,
+					    safi_t safi, bool set, bool out, const char *num,
+					    const char *threshold, int warning,
+					    const char *restart, const char *force,
+					    bool old_threshold, bool old_tw_threshold,
+					    bool old_tr_threshold, bool old_tr_restart,
+					    bool old_warning, bool old_restart, bool old_force)
 {
 	struct bgp *bgp;
 	struct peer *peer;
@@ -10446,18 +10496,74 @@ static void bgp_nb_peer_maximum_prefix_dual(struct vty *vty,
 	 * already-present entry would abort the whole apply batch.
 	 */
 	if (set && !out) {
+		/*
+		 * Stale-option clear (Greptile #40 / P003): the legacy
+		 * setter RESETS the options the new command omits, so
+		 * the mirror must destroy them in the datastore too.
+		 * Otherwise the northbound apply of this very batch
+		 * re-applies the stale datastore values to the runtime
+		 * through peer_maximum_prefix_set() and the re-issue
+		 * becomes a no-op for the omitted knobs on BOTH planes.
+		 * The stale set comes from the datastore itself, and
+		 * destroys of absent leaves are tolerated anyway.
+		 */
+		const char *old_case[2];
+		const char *new_case[2];
+		int n_old = 0, n_new = 0, i, j;
+		bool keep;
+
+		if (threshold && warning) {
+			new_case[n_new++] = "tw-shutdown-threshold-pct";
+			new_case[n_new++] = "tw-warning-only";
+		} else if (warning) {
+			new_case[n_new++] = "warning-only";
+		} else if (threshold && restart) {
+			new_case[n_new++] = "tr-shutdown-threshold-pct";
+			new_case[n_new++] = "tr-restart-timer";
+		} else if (threshold) {
+			new_case[n_new++] = "shutdown-threshold-pct";
+		} else if (restart) {
+			new_case[n_new++] = "restart-timer";
+		}
+
+		if (old_tw_threshold) {
+			old_case[n_old++] = "tw-shutdown-threshold-pct";
+			old_case[n_old++] = "tw-warning-only";
+		} else if (old_tr_threshold) {
+			old_case[n_old++] = "tr-shutdown-threshold-pct";
+			if (old_tr_restart)
+				old_case[n_old++] = "tr-restart-timer";
+		} else if (old_threshold) {
+			old_case[n_old++] = "shutdown-threshold-pct";
+		} else if (old_restart) {
+			old_case[n_old++] = "restart-timer";
+		} else if (old_warning) {
+			old_case[n_old++] = "warning-only";
+		}
+
+		for (i = 0; i < n_old; i++) {
+			keep = false;
+			for (j = 0; j < n_new; j++)
+				if (strmatch(old_case[i], new_case[j]))
+					keep = true;
+			if (!keep) {
+				snprintfrr(leaf, sizeof(leaf), "%s/options/%s", entry, old_case[i]);
+				nb_cli_enqueue_change(vty, leaf, NB_OP_DESTROY, NULL);
+			}
+		}
+		if (old_force && !force) {
+			snprintfrr(leaf, sizeof(leaf), "%s/force-check", entry);
+			nb_cli_enqueue_change(vty, leaf, NB_OP_DESTROY, NULL);
+		}
+
 		snprintfrr(leaf, sizeof(leaf), "%s/max-prefixes", entry);
 		nb_cli_enqueue_change(vty, leaf, NB_OP_MODIFY, num);
 		if (threshold && warning) {
-			snprintfrr(leaf, sizeof(leaf),
-				 "%s/options/tw-shutdown-threshold-pct",
-				 entry);
-			nb_cli_enqueue_change(vty, leaf, NB_OP_MODIFY,
-					      threshold);
-			snprintfrr(leaf, sizeof(leaf),
-				 "%s/options/tw-warning-only", entry);
-			nb_cli_enqueue_change(vty, leaf, NB_OP_MODIFY,
-					      "true");
+			snprintfrr(leaf, sizeof(leaf), "%s/options/tw-shutdown-threshold-pct",
+				   entry);
+			nb_cli_enqueue_change(vty, leaf, NB_OP_MODIFY, threshold);
+			snprintfrr(leaf, sizeof(leaf), "%s/options/tw-warning-only", entry);
+			nb_cli_enqueue_change(vty, leaf, NB_OP_MODIFY, "true");
 		} else if (warning) {
 			snprintfrr(leaf, sizeof(leaf),
 				 "%s/options/warning-only", entry);
@@ -10526,6 +10632,8 @@ static int peer_maximum_prefix_set_vty(struct vty *vty, const char *ip_str,
 	uint32_t max;
 	uint8_t threshold;
 	uint16_t restart;
+	bool old_threshold, old_tw_threshold, old_tr_threshold;
+	bool old_tr_restart, old_warning, old_restart, old_force;
 
 	peer = peer_and_group_lookup_vty(vty, ip_str);
 	if (!peer)
@@ -10542,18 +10650,44 @@ static int peer_maximum_prefix_set_vty(struct vty *vty, const char *ip_str,
 	else
 		restart = 0;
 
-	ret = peer_maximum_prefix_set(peer, afi, safi, max, threshold, warning,
-				      restart, force_str ? true : false);
+	/*
+	 * Snapshot the pre-set option state from the DATASTORE (the
+	 * candidate the CLI edits): peer_maximum_prefix_set() resets
+	 * the omitted knobs below, and the dual-write needs to know
+	 * which datastore options are about to become stale. The
+	 * runtime knobs cannot answer this -- a threshold at exactly
+	 * the default value reads as absent there.
+	 */
+	/*
+	 * Probe the five case leaves directly -- the datastore shape is
+	 * the truth: a tw case stores tw-warning-only (not warning-only),
+	 * and a threshold at the default value is still a present leaf.
+	 */
+	old_threshold = bgp_nb_pl_ds_option(vty, peer, afi, safi, "options/shutdown-threshold-pct");
+	old_tw_threshold = bgp_nb_pl_ds_option(vty, peer, afi, safi,
+					       "options/tw-shutdown-threshold-pct");
+	old_tr_threshold = bgp_nb_pl_ds_option(vty, peer, afi, safi,
+					       "options/tr-shutdown-threshold-pct");
+	old_tr_restart = bgp_nb_pl_ds_option(vty, peer, afi, safi, "options/tr-restart-timer");
+	old_warning = bgp_nb_pl_ds_option(vty, peer, afi, safi, "options/warning-only") ||
+		      bgp_nb_pl_ds_option(vty, peer, afi, safi, "options/tw-warning-only");
+	old_restart = bgp_nb_pl_ds_option(vty, peer, afi, safi, "options/restart-timer");
+	old_force = bgp_nb_pl_ds_option(vty, peer, afi, safi, "force-check");
+
+	ret = peer_maximum_prefix_set(peer, afi, safi, max, threshold, warning, restart,
+				      force_str ? true : false);
 	if (ret == 0)
-		bgp_nb_peer_maximum_prefix_dual(
-			vty, ip_str, afi, safi, true, false, num_str,
-			threshold_str, warning, restart_str, force_str);
+		bgp_nb_peer_maximum_prefix_dual(vty, ip_str, afi, safi, true, false, num_str,
+						threshold_str, warning, restart_str, force_str,
+						old_threshold, old_tw_threshold, old_tr_threshold,
+						old_tr_restart, old_warning, old_restart,
+						old_force);
 
 	return bgp_vty_return(vty, ret);
 }
 
-static int peer_maximum_prefix_unset_vty(struct vty *vty, const char *ip_str,
-					 afi_t afi, safi_t safi)
+static int peer_maximum_prefix_unset_vty(struct vty *vty, const char *ip_str, afi_t afi,
+					 safi_t safi)
 {
 	int ret;
 	struct peer *peer;
@@ -10564,9 +10698,9 @@ static int peer_maximum_prefix_unset_vty(struct vty *vty, const char *ip_str,
 
 	ret = peer_maximum_prefix_unset(peer, afi, safi);
 	if (ret == 0)
-		bgp_nb_peer_maximum_prefix_dual(vty, ip_str, afi, safi,
-						false, false, NULL, NULL, 0,
-						NULL, NULL);
+		bgp_nb_peer_maximum_prefix_dual(vty, ip_str, afi, safi, false, false, NULL, NULL,
+						0, NULL, NULL, false, false, false, false, false,
+						false, false);
 
 	return bgp_vty_return(vty, ret);
 }
@@ -10596,9 +10730,9 @@ DEFPY_YANG(neighbor_maximum_prefix_out,
 
 	ret = peer_maximum_prefix_out_set(peer, afi, safi, max);
 	if (ret == 0)
-		bgp_nb_peer_maximum_prefix_dual(
-			vty, argv[idx_peer]->arg, afi, safi, true, true,
-			argv[idx_number]->arg, NULL, 0, NULL, NULL);
+		bgp_nb_peer_maximum_prefix_dual(vty, argv[idx_peer]->arg, afi, safi, true, true,
+						argv[idx_number]->arg, NULL, 0, NULL, NULL, false,
+						false, false, false, false, false, false);
 
 	return bgp_vty_return(vty, ret);
 }
@@ -10624,9 +10758,9 @@ DEFPY_YANG(no_neighbor_maximum_prefix_out,
 
 	ret = peer_maximum_prefix_out_unset(peer, afi, safi);
 	if (ret == 0)
-		bgp_nb_peer_maximum_prefix_dual(
-			vty, argv[idx_peer]->arg, afi, safi, false, true,
-			NULL, NULL, 0, NULL, NULL);
+		bgp_nb_peer_maximum_prefix_dual(vty, argv[idx_peer]->arg, afi, safi, false, true,
+						NULL, NULL, 0, NULL, NULL, false, false, false,
+						false, false, false, false);
 
 	return bgp_vty_return(vty, ret);
 }
