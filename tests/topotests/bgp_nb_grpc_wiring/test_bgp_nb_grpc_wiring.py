@@ -16,6 +16,7 @@ callbacks); the flipped test guards that the commit now applies.
 import glob
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -626,6 +627,16 @@ f"{dl}/options/tw-shutdown-threshold-pct=75,"
     )
 
 
+def _pgw_maxp_line(output):
+    """The `neighbor pgw maximum-prefix ...` render line, or "".
+
+    Anchors the stale-option asserts on the peer-group's own line so
+    residue from sibling tests on other neighbors cannot cascade a
+    false failure into this test (P004 adversarial review)."""
+    match = re.search(r"^\s*neighbor pgw maximum-prefix.*$", output, re.MULTILINE)
+    return match.group(0) if match else ""
+
+
 def test_prefix_limit_pg_cli_reemit_clears_stale_options():
     """P004 (typed finding of P003): the peer-group context of the
     stale-option clear. Seeding the tw case through gRPC and
@@ -681,20 +692,22 @@ def test_prefix_limit_pg_cli_reemit_clears_stale_options():
         "neighbor pgw maximum-prefix 400\n"
     )
     output = r1.vtysh_cmd("show running-config bgpd")
-    assert "neighbor pgw maximum-prefix 400" in output, (
+    line = _pgw_maxp_line(output)
+    assert "neighbor pgw maximum-prefix 400" in line, (
         f"re-issue must render on the group; got:\n{output}"
     )
-    assert "warning-only" not in output, (
+    assert "warning-only" not in line, (
         f"BASE: the group runtime kept the stale tw case; got:\n{output}"
     )
 
     step("Re-affirm through gRPC: the diff apply must not resurrect them")
     run_grpc_client(r1, f"commit-set,{dl}/max-prefixes=400")
     output = r1.vtysh_cmd("show running-config bgpd")
-    assert "neighbor pgw maximum-prefix 400" in output, (
+    line = _pgw_maxp_line(output)
+    assert "neighbor pgw maximum-prefix 400" in line, (
         f"re-affirm must render; got:\n{output}"
     )
-    assert "warning-only" not in output, (
+    assert "warning-only" not in line, (
         f"stale group options resurrected on the gRPC apply; got:\n{output}"
     )
 
@@ -706,7 +719,7 @@ def test_prefix_limit_pg_cli_reemit_clears_stale_options():
         f"{dl}/options/tw-warning-only=true",
     )
     output = r1.vtysh_cmd("show running-config bgpd")
-    assert "neighbor pgw maximum-prefix 300 80" in output, (
+    assert "neighbor pgw maximum-prefix 300 80" in _pgw_maxp_line(output), (
         f"expected the explicit threshold on the group render; got:\n{output}"
     )
     r1.vtysh_cmd(
@@ -715,16 +728,29 @@ def test_prefix_limit_pg_cli_reemit_clears_stale_options():
         "neighbor pgw maximum-prefix 400\n"
     )
     output = r1.vtysh_cmd("show running-config bgpd")
-    assert "neighbor pgw maximum-prefix 400" in output, (
+    line = _pgw_maxp_line(output)
+    assert "neighbor pgw maximum-prefix 400" in line, (
         f"re-issue must render on the group; got:\n{output}"
     )
-    assert "warning-only" not in output and " 80" not in output, (
+    assert "warning-only" not in line and " 80" not in line, (
         f"BASE: the group runtime kept the explicit stale case; got:\n{output}"
     )
 
     step("Destroy the direction-list; nothing survives on the group")
     run_grpc_client(r1, f"commit-delete,{dl}")
     output = r1.vtysh_cmd("show running-config bgpd")
-    assert "neighbor pgw maximum-prefix" not in output, (
+    assert "neighbor pgw maximum-prefix" not in _pgw_maxp_line(output), (
         f"destroy must clear the group render; got:\n{output}"
+    )
+
+    step("Teardown: detach the member and remove the peer-group")
+    r1.vtysh_cmd(
+        "configure terminal\nrouter bgp 65000\n"
+        f"no neighbor {PEER} peer-group pgw\n"
+        "no neighbor pgw peer-group\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "pgw" not in output, (
+        f"the peer-group must be gone so later tests on the shared "
+        f"neighbor start clean; got:\n{output}"
     )
