@@ -624,3 +624,107 @@ f"{dl}/options/tw-shutdown-threshold-pct=75,"
     assert "maximum-prefix" not in output, (
         f"destroy must clear the render; got:\n{output}"
     )
+
+
+def test_prefix_limit_pg_cli_reemit_clears_stale_options():
+    """P004 (typed finding of P003): the peer-group context of the
+    stale-option clear. Seeding the tw case through gRPC and
+    re-issuing `maximum-prefix` bare through the legacy CLI must
+    clear the stale options from the group runtime, and the gRPC
+    re-affirm must not resurrect them. On base 221666459f the group
+    render kept `400 warning-only` (and `400 80` for the
+    explicit-threshold seed): the re-apply of the very batch dragged
+    the group's stale datastore options back into the runtime. The
+    P003 v3 DS-truth snapshot covers the group context as a side
+    effect (the runtime knobs of a group blend inherited state a
+    runtime-flags snapshot cannot trust); this test pins it. The
+    seed must come through gRPC: a CLI-only seed never reaches the
+    datastore copy the dual-write reads (proven by the P004 repro
+    matrix -- a CLI-only seed does not manifest the divergence on
+    any head)."""
+    tgen = get_topogen()
+    r1 = tgen.gears["r1"]
+    pg = f"{CPP}/peer-groups/peer-group[peer-group-name='pgw']"
+    dl = (
+        f"{pg}/afi-safis"
+        "/afi-safi[afi-safi-name='frr-routing:ipv4-unicast']"
+        "/ipv4-unicast/prefix-limit/direction-list[direction='in']"
+    )
+
+    step("Create the peer-group and attach the member")
+    r1.vtysh_cmd(
+        "configure terminal\nrouter bgp 65000\n"
+        "neighbor pgw peer-group\n"
+        f"neighbor {PEER} remote-as 65001\n"
+        f"neighbor {PEER} peer-group pgw\n"
+    )
+
+    step("State the full tw case through one gRPC commit")
+    run_grpc_client(
+        r1,
+        f"commit-result,ALL,"
+        f"{dl}/max-prefixes=300,"
+        # threshold at EXACTLY the yang default (75): the legacy
+        # render omits it -- only warning-only shows
+        f"{dl}/options/tw-shutdown-threshold-pct=75,"
+        f"{dl}/options/tw-warning-only=true",
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "neighbor pgw maximum-prefix 300 warning-only" in output, (
+        f"expected the tw case on the group render; got:\n{output}"
+    )
+
+    step("Re-issue bare through the legacy CLI")
+    r1.vtysh_cmd(
+        "configure terminal\nrouter bgp 65000\n"
+        "address-family ipv4 unicast\n"
+        "neighbor pgw maximum-prefix 400\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "neighbor pgw maximum-prefix 400" in output, (
+        f"re-issue must render on the group; got:\n{output}"
+    )
+    assert "warning-only" not in output, (
+        f"BASE: the group runtime kept the stale tw case; got:\n{output}"
+    )
+
+    step("Re-affirm through gRPC: the diff apply must not resurrect them")
+    run_grpc_client(r1, f"commit-set,{dl}/max-prefixes=400")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "neighbor pgw maximum-prefix 400" in output, (
+        f"re-affirm must render; got:\n{output}"
+    )
+    assert "warning-only" not in output, (
+        f"stale group options resurrected on the gRPC apply; got:\n{output}"
+    )
+
+    step("Explicit-threshold seed (tw 80): the bare re-issue drops it too")
+    run_grpc_client(
+        r1,
+        f"commit-result,ALL,{dl}/max-prefixes=300,"
+        f"{dl}/options/tw-shutdown-threshold-pct=80,"
+        f"{dl}/options/tw-warning-only=true",
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "neighbor pgw maximum-prefix 300 80" in output, (
+        f"expected the explicit threshold on the group render; got:\n{output}"
+    )
+    r1.vtysh_cmd(
+        "configure terminal\nrouter bgp 65000\n"
+        "address-family ipv4 unicast\n"
+        "neighbor pgw maximum-prefix 400\n"
+    )
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "neighbor pgw maximum-prefix 400" in output, (
+        f"re-issue must render on the group; got:\n{output}"
+    )
+    assert "warning-only" not in output and " 80" not in output, (
+        f"BASE: the group runtime kept the explicit stale case; got:\n{output}"
+    )
+
+    step("Destroy the direction-list; nothing survives on the group")
+    run_grpc_client(r1, f"commit-delete,{dl}")
+    output = r1.vtysh_cmd("show running-config bgpd")
+    assert "neighbor pgw maximum-prefix" not in output, (
+        f"destroy must clear the group render; got:\n{output}"
+    )
